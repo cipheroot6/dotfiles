@@ -1,0 +1,84 @@
+# =============================================================================
+# Shell
+# =============================================================================
+command = /bin/zsh
+
+# =============================================================================
+# Theme
+# =============================================================================
+config-file = ?~/.config/omarchy/current/theme/ghostty.conf
+window-theme = ghostty
+
+background = #000000
+foreground = #ffffff
+
+cursor-color = #ff64d1
+cursor-text  = #ffffff
+
+selection-background = #2a2a2a
+selection-foreground = #ffffff
+
+palette = 0=#262626
+palette = 1=#ffffff
+palette = 2=#66cc66
+palette = 3=#ffcc66
+palette = 4=#6699ff
+palette = 5=#cc66cc
+palette = 6=#66cccc
+palette = 7=#f2f2f2
+palette = 8=#404040
+palette = 9=#ff6666
+palette = 10=#80e680
+palette = 11=#ffdd80
+palette = 12=#80b3ff
+palette = 13=#e680e6
+palette = 14=#80e6e6
+palette = 15=#ffffff
+
+# =============================================================================
+# Font
+# =============================================================================
+font-family       = VictorMono Nerd Font
+font-size         = 12
+font-style        = Italic
+font-style-bold   = Bold
+font-style-italic = Italic
+
+# =============================================================================
+# Window
+# =============================================================================
+window-decoration      = none
+window-padding-x       = 10
+window-padding-y       = 10
+background-opacity     = 0.5
+confirm-close-surface  = false
+resize-overlay         = never
+gtk-toolbar-style      = flat
+
+# =============================================================================
+# Cursor
+# =============================================================================
+cursor-style       = block
+cursor-style-blink = true
+
+# Shell integration (all options must be passed together)
+shell-integration-features = no-cursor,ssh-env
+
+# =============================================================================
+# Keyboard bindings
+# =============================================================================
+keybind = shift+insert=paste_from_clipboard
+keybind = control+insert=copy_to_clipboard
+keybind = super+control+shift+alt+arrow_down=resize_split:down,100
+keybind = super+control+shift+alt+arrow_up=resize_split:up,100
+keybind = super+control+shift+alt+arrow_left=resize_split:left,100
+keybind = super+control+shift+alt+arrow_right=resize_split:right,100
+
+# =============================================================================
+# Misc
+# =============================================================================
+# Slow down mouse scrolling
+mouse-scroll-multiplier = 0.95
+
+# Fix general slowness on Hyprland (https://github.com/ghostty-org/ghostty/discussions/3224)
+async-backend = epoll
