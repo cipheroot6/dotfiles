@@ -1,0 +1,120 @@
+{
+  "reload_style_on_change": true,
+  "layer": "top",
+  "position": "top",
+  "spacing": 0,
+  "height": 1,
+  "margin-top": 0,
+  "margin-left": 0,
+  "margin-right": 0,
+  
+  "modules-left": ["mpris", "custom/cava", "custom/active_window"],
+  "modules-center": [ "group/center3-expander", "clock#date", "custom/screenrecording-indicator", "custom/idle-indicator", "group/center2-expander" ],
+  "modules-right": [
+    "custom/separator#blank",
+    "custom/separator#dot",
+    "group/right2-expander",
+    "group/right1"
+  ],
+
+  "group/center2": {
+    "orientation": "inherit",
+    "modules": [ "custom/update", "custom/notification-silencing-indicator" ]
+  },
+  "group/center3": {
+    "orientation": "inherit",
+    "modules": [ "temperature", "privacy" ]
+  },
+  "group/right1": {
+    "orientation": "inherit",
+    "modules": [ "network", "battery" ]
+  },
+  "group/right2": {
+    "orientation": "inherit",
+    "modules": [ "cpu", "custom/separator#dot", "memory", "custom/separator#dot", "disk" ]
+  },
+
+  "group/center3-expander": {
+    "orientation": "inherit",
+    "drawer": { "transition-duration": 600, "children-class": "center3-group-item" },
+    "modules": ["custom/expand-iconl", "group/center3"]
+  },
+  "group/center2-expander": {
+    "orientation": "inherit",
+    "drawer": { "transition-duration": 600, "transition-left-to-right": false, "children-class": "center2-group-item" },
+    "modules": [ "custom/expand-iconr", "group/center2"]
+  },
+  "group/right2-expander": {
+    "orientation": "inherit",
+    "drawer": { "transition-duration": 600, "transition-left-to-right": false, "children-class": "right2-group-item" },
+    "modules": [ "custom/expand-iconr2", "group/right2" ]
+  },
+
+  "custom/expand-iconl":    { "format": "  ", "tooltip": false },
+  "custom/expand-iconr":    { "format": "  ", "tooltip": false },
+  "custom/expand-iconr2":   { "format": "•", "tooltip": false },
+  "custom/separator#blank": { "format": " ", "tooltip": false },
+  "custom/separator#dot":   { "format": "  ", "tooltip": false },
+
+  "clock#date": {
+    "interval": 1,
+    "format": "{:%a %d  %I:%M}",
+    "tooltip": false
+  },
+
+  "mpris": {
+    "format": "󰎆 {title}",
+    "format-paused": "",
+    "max-length": 35,
+    "tooltip": false
+  },
+
+  "custom/cava": {
+    "exec": "~/.config/waybar/cava.sh",
+    "return-type": "json",
+    "format": "{}",
+    "tooltip": false
+  },
+
+  "temperature": {
+    // "thermal-zone": 2,
+    "hwmon-path": "/sys/class/hwmon/hwmon1/temp1_input",
+    "critical-threshold": 80,
+    // "format-critical": "{temperatureC}°C ",
+    "format": "  {temperatureC}°C"
+  },
+
+  "privacy": {
+    "icon-spacing": 6,
+    "icon-size": 12,
+    "transition-duration": 250,
+    "modules": [
+      { "type": "screenshare", "tooltip": true, "tooltip-icon-size": 24 },
+      { "type": "audio-in",    "tooltip": true, "tooltip-icon-size": 24 }
+    ]
+  },
+
+  "network": {
+    "format-wifi": " 󰤨 ",
+    "format-ethernet": "󰈀",
+    "format-disconnected": "󰤭",
+    "tooltip-format-wifi": "{essid}  {signalStrength}%",
+    "tooltip-format-ethernet": "{ifname}",
+    "tooltip-format-disconnected": "Not connected",
+    "max-length": 20
+  },
+
+  "battery": {
+    "format": "{icon} {capacity}%",
+    "format-charging": "󰂄 {capacity}%",
+    "format-plugged": "󰚥 {capacity}%",
+    "format-icons": ["󰁺", "󰁻", "󰁼", "󰁽", "󰁾", "󰁿", "󰂀", "󰂁", "󰂂", "󰁹"],
+    "states": { "warning": 30, "critical": 15 },
+    "tooltip": false
+  },
+
+  "cpu":    { "format": "󰻠 {usage}%" },
+  "memory": { "format": "󰍛 {percentage}%" },
+  "disk":   { "format": "󰋊 {percentage_used}%", "path": "/" },
+  "tray":   { "icon-size": 16, "spacing": 8 }
+}
