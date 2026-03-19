@@ -1,5 +1,0 @@
-# This directory is a Syncthing folder marker.
-# Do not delete.
-
-folderID: wvzhv-ngzsg
-created: 2026-03-18T15:51:32+05:30

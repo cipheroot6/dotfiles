@@ -28,7 +28,8 @@ window#waybar {
 
 #cpu,
 #memory,
-#disk {
+#disk,
+#temperature {
   font-weight: 700;
   background-color: rgba(40, 40, 60, 0.5);
   border-radius: 12px;
@@ -106,14 +107,12 @@ tooltip label {
   color: #cdd6f4;
 }
 
-#custom-expand-iconl,
 #custom-expand-iconr {
   opacity: 0;
   font-size: 14px;
-  min-width: 200px;
+  min-width: 10px;
 }
 
-#custom-expand-iconl:hover,
 #custom-expand-iconr:hover {
   opacity: 0;
 }
@@ -121,7 +120,6 @@ tooltip label {
 /* Right drawer contents */
 #temperature {
   color: #89dceb;
-  padding: 0 6px;
 }
 
 #temperature.critical {
@@ -129,7 +127,10 @@ tooltip label {
 }
 
 #privacy {
-  padding: 0 4px;
+  padding: 2px 4px;
+  margin: 4px 3px;
+  background-color: rgba(40, 40, 60, 0.5);
+  border-radius: 12px;
 }
 
 #privacy-item {
