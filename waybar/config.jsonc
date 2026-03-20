@@ -9,7 +9,7 @@
   "margin-right": 0,
 
   // Clock is the ONLY module in center — nothing here can shift it
-  "modules-left": ["mpris", "custom/cava", "custom/active_window"],
+  "modules-left": ["mpris", "custom/weather", "custom/cava", "custom/active_window"],
   "modules-center": ["clock#date"],
   "modules-right": [
     "custom/screenrecording-indicator",
@@ -73,6 +73,15 @@
     "tooltip": false,
   },
 
+  "custom/weather": {
+    "exec": "~/.config/waybar/weather.sh",
+    "return-type": "json",
+    "interval": 2,
+    "format": "{}",
+    "escape": false,
+    "tooltip": false,
+  },
+
   "mpris": {
     "format": "󰎆 {title}",
     "format-paused": "",
@@ -116,7 +125,7 @@
 
   "battery": {
     "format": "{icon} {capacity}%",
-    "format-charging": "󰂄 {capacity}%",
+    "format-charging": "󰚥 {capacity}%",
     "format-plugged": "󰚥 {capacity}%",
     "format-icons": ["󰁺", "󰁻", "󰁼", "󰁽", "󰁾", "󰁿", "󰂀", "󰂁", "󰂂", "󰁹"],
     "states": { "warning": 30, "critical": 15 },
@@ -124,7 +133,7 @@
   },
 
   "cpu": { "format": "󰻠 {usage}%" },
-  "memory": { "format": "󰍛 {percentage}%" },
+  "memory": { "format": " {percentage}%" },
   "disk": { "format": "󰋊 {percentage_used}%", "path": "/" },
   "tray": { "icon-size": 16, "spacing": 8 },
 }
