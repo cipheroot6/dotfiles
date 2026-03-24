@@ -178,11 +178,6 @@ tooltip label {
   color: #6c7086;
 }
 
-#battery {
-  color: #cba6f7;
-  padding: 0 6px;
-}
-
 #battery.warning {
   color: #f9e2af;
 }
@@ -193,13 +188,22 @@ tooltip label {
 }
 
 #battery.charging {
-  color: #99FF99;
-}
-
-#battery.plugged {
   color: #cba6f7;
 }
 
+#battery.plugged {
+  color: #99ff99;
+}
+
+#battery {
+  color: #cba6f7;
+  padding: 0 6px;
+}
+
+#battery.charging.warning,
+#battery.charging.critical {
+    color: #99FF99;
+}
 
 @keyframes blink {
   to {
