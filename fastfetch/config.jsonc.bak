@@ -1,19 +1,22 @@
 {
   "logo": {
     "type": "kitty-direct",
-    "source": "~/.config/fastfetch/logo.png",   //if ur cant see this use terminals like ghostty or kitty 
-    "width": 43,
-    "height": 21,
-    "padding": {
-      "left": 2,
-      "top": 1
-    }
+  "source": "~/.config/fastfetch/logo.png",
+  "width": 50,
+  "height": 28,
+  "preserveAspectRatio": true,
+  "padding": {
+    "left": 2,
+    "top": 1
   },
+
   "display": {
     "separator": " 󰑃  "
   },
   "modules": [
-    "break",
+    {
+      "type": "break"
+    },
     {
       "type": "os",
       "key": " DISTRO",
@@ -33,7 +36,7 @@
       "type": "command",
       "key": "│ ├",
       "keyColor": "magenta",
-      "text": "birth_install=$(stat -c %W /); current=$(date +%s); time_progression=$((current - birth_install)); days_difference=$((time_progression / 86400)); echo $days_difference days",
+      "text": "birth_install=$(stat -c %W /); current=$(date +%s); time_progression=$((current - birth_install)); days_difference=$((time_progression / 86400)); echo $days_difference days"
     },
     {
       "type": "shell",
@@ -112,7 +115,7 @@
       "type": "command",
       "key": "│ ├󰔏",
       "keyColor": "magenta",
-      "text": "awk '{printf \"cpu temperature: %.1f°C\", $1/1000}' /sys/class/hwmon/hwmon6/temp1_input",
+      "text": "awk '{printf \"cpu temperature: %.1f°C\", $1/1000}' /sys/class/hwmon/hwmon6/temp1_input"
     },
     {
       "type": "uptime",
@@ -135,6 +138,8 @@
       "key": "│ └󰝚",
       "keyColor": "magenta"
     },
-    "break"
+    {
+      "type": "break"
+    }
   ]
 }
