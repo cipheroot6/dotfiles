@@ -1,0 +1,466 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  dec  v5.0 — decrypt files created by enc v5.0
+#  Usage : dec <file.vault | file[.tar][.<comp>].<age|gpg>>
+#
+#  Auto-detects everything from filename + vault header.
+#  Only asks for password.
+#
+#  SECURITY MODEL:
+#    Authenticated vault modes (AUTH=yes):
+#      HMAC-SHA256 is computed over (all header fields || ciphertext)
+#      → verifies BEFORE decryption (fail-fast)
+#      → any change to ALGO/COMP/IV/ORIG/KDF params or ciphertext = instant abort
+#
+#    Unauthenticated modes (AUTH=no):
+#      No tamper detection — decryption failure is the only signal
+#
+#    none-encryption vaults:
+#      SHA-256 integrity check on data before extraction
+#
+#  OTHER SAFEGUARDS:
+#    - Full file details shown BEFORE password prompt
+#    - ORIG sanitized to basename only (no path traversal)
+#    - Tar pre-scanned for absolute paths and ../ traversal
+#    - Extraction always into private staging dir, then CWD only
+#    - Temp dir chmod 700
+# =============================================================================
+
+set -uo pipefail
+
+# ── Catppuccin Mocha ──────────────────────────────────────────────────────────
+RED='\033[38;2;243;139;168m';    GREEN='\033[38;2;166;227;161m'
+YELLOW='\033[38;2;249;226;175m'; BLUE='\033[38;2;137;180;250m'
+MAUVE='\033[38;2;203;166;247m';  PEACH='\033[38;2;250;179;135m'
+TEAL='\033[38;2;148;226;213m';   LAVENDER='\033[38;2;180;190;254m'
+SAPPHIRE='\033[38;2;116;199;236m'
+TEXT='\033[38;2;205;214;244m';   SUBTEXT='\033[38;2;166;173;200m'
+BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
+
+ok()    { echo -e "${GREEN}  ✓  ${*}${NC}"; }
+err()   { echo -e "${RED}  ✗  ${*}${NC}" >&2; }
+warn()  { echo -e "${YELLOW}  ⚠  ${*}${NC}"; }
+info()  { echo -e "${TEAL}  →  ${*}${NC}"; }
+step()  { echo -e "\n${MAUVE}${BOLD}  ══  ${*}${NC}"; }
+label() { echo -e "${SUBTEXT}  ${1}${TEXT}${2}${NC}"; }
+sep()   { echo -e "${SUBTEXT}${DIM}  ─────────────────────────────────────${NC}"; }
+
+banner() {
+  echo
+  echo -e "${MAUVE}${BOLD}  ╔══════════════════════════════════════╗${NC}"
+  echo -e "${MAUVE}${BOLD}  ║   🔓  vault dec  v5.0                ║${NC}"
+  echo -e "${MAUVE}${BOLD}  ╚══════════════════════════════════════╝${NC}"
+  echo
+}
+
+VAULT_TMP=""
+cleanup() { [[ -n "$VAULT_TMP" && -d "$VAULT_TMP" ]] && rm -rf "$VAULT_TMP"; }
+trap cleanup EXIT INT TERM
+
+need() { command -v "$1" &>/dev/null || { err "'$1' not installed.  $2"; exit 1; }; }
+
+# ── Sanitize filename ─────────────────────────────────────────────────────────
+sanitize_name() {
+  local raw="$1"
+  raw="${raw//$'\0'/}"
+  raw="$(basename "$raw")"
+  [[ -z "$raw" || "$raw" == "." || "$raw" == ".." ]] && {
+    err "Unsafe filename in vault: '${1}' — aborting."
+    err "This vault may be crafted to attack your system."
+    exit 1
+  }
+  [[ "$raw" == */* || "$raw" == *\\* ]] && {
+    err "Filename contains path separator after sanitization — aborting."
+    exit 1
+  }
+  printf '%s' "$raw"
+}
+
+# ── Pre-scan tar for dangerous paths ─────────────────────────────────────────
+check_tar_safety() {
+  local archive="$1"
+  local paths
+  paths=$(tar -tf "$archive" 2>/dev/null) || {
+    err "Cannot list archive entries — may be corrupted"
+    exit 1
+  }
+  local dangerous
+  dangerous=$(printf '%s\n' "$paths" | grep -E '(^|/)\.\.(^|/)|(^/)' || true)
+  if [[ -n "$dangerous" ]]; then
+    echo
+    err "Archive contains dangerous paths — REFUSING to extract:"
+    printf '%s\n' "$dangerous" | head -10 | while IFS= read -r p; do
+      echo -e "    ${RED}  ${p}${NC}" >&2
+    done
+    err "Vault was likely crafted to overwrite critical system files."
+    exit 1
+  fi
+  local nsym
+  nsym=$(tar -tvf "$archive" 2>/dev/null | grep -c '^l' || true)
+  (( nsym > 0 )) && warn "Archive contains ${nsym} symlink(s) — verify source trust."
+  local n
+  n=$(printf '%s\n' "$paths" | wc -l)
+  if (( n > 10000 )); then
+    warn "Archive has ${n} entries (unusually large)."
+    printf "${PEACH}  Continue? [y/N]  ${NC}"; read -r ans
+    [[ "$ans" =~ ^[yY]$ ]] || { err "Aborted."; exit 1; }
+  fi
+}
+
+# ── Argon2id key derivation ───────────────────────────────────────────────────
+# Returns 128 hex chars (64 bytes) in global $RAW_KEY
+derive_key() {
+  local passwd="$1" salt="$2" t="$3" m="$4" p="$5"
+  RAW_KEY=$(printf '%s' "$passwd" \
+    | argon2 "$salt" -id -t "$t" -m "$m" -p "$p" -l 64 -r 2>/dev/null \
+    | tr -d '[:space:]')
+  [[ ${#RAW_KEY} -eq 128 ]] || {
+    err "Argon2id key derivation failed"
+    err "Ensure argon2 is installed: sudo pacman -S argon2"
+    exit 1
+  }
+}
+
+# =============================================================================
+main() {
+  banner
+  need tar     "sudo pacman -S tar"
+  need dd      "coreutils"
+  need openssl "sudo pacman -S openssl"
+
+  [[ $# -lt 1 ]] && {
+    err "Usage: dec <file.vault | file[.tar][.<ext>].<age|gpg>>"
+    exit 1
+  }
+
+  INPUT="$1"
+  [[ ! -f "$INPUT" ]] && { err "File not found: $INPUT"; exit 1; }
+  INPUT="$(realpath "$INPUT")"
+
+  # ── Detect method from extension ──────────────────────────────────────────
+  case "$INPUT" in
+    *.vault)     METHOD="vault" ;;
+    *.age)       METHOD="age"   ;;
+    *.gpg|*.pgp) METHOD="gpg"   ;;
+    *)
+      err "Unknown extension: $(basename "$INPUT")"
+      err "Expected: .vault | [.tar][.<comp>].age | [.tar][.<comp>].gpg"
+      exit 1 ;;
+  esac
+
+  # ── Init all metadata vars ─────────────────────────────────────────────────
+  ALGO=""; LABEL=""; AUTH="no"; COMP=""; FTYPE=""; ORIG_NAME=""
+  HAS_TAR=true; KDF_SALT=""; KDF_T=3; KDF_M=14; KDF_P=4; KEY_LEN=64
+  IV=""; STORED_HMAC=""; INTEGRITY=""; HDR_LEN=0; HDR=""
+
+  # ── Parse vault header ─────────────────────────────────────────────────────
+  if [[ "$METHOD" == "vault" ]]; then
+    HDR_HEX=$(dd if="$INPUT" bs=1 count=8 2>/dev/null)
+    [[ "$HDR_HEX" =~ ^[0-9a-fA-F]{8}$ ]] || {
+      err "Not a valid vault file (bad magic bytes: '${HDR_HEX}')"
+      exit 1
+    }
+    HDR_LEN=$((16#$HDR_HEX))
+    (( HDR_LEN > 0 && HDR_LEN <= 8192 )) || {
+      err "Header length implausible: ${HDR_LEN} bytes"
+      exit 1
+    }
+    HDR=$(dd if="$INPUT" bs=1 skip=8 count="$HDR_LEN" 2>/dev/null)
+    VERSION=$(printf '%s\n' "$HDR" | head -n1)
+    [[ "$VERSION" == "VAULTV1" ]] || {
+      err "Unsupported vault version: '${VERSION}'"
+      exit 1
+    }
+
+    # Helper: extract a field from header
+    _hf() { printf '%s\n' "$HDR" | grep -m1 "^${1}=" | cut -d= -f2-; }
+
+    LABEL="$(_hf LABEL)"; ALGO="$(_hf ALGO)"; AUTH="$(_hf AUTH)"
+    COMP="$(_hf COMP)";   FTYPE="$(_hf TYPE)"; ORIG_NAME="$(_hf ORIG)"
+    TAR_F="$(_hf TAR)";   [[ "$TAR_F" == "false" ]] && HAS_TAR=false || HAS_TAR=true
+
+    if [[ "$ALGO" != "none" ]]; then
+      KDF_SALT="$(_hf KDF_SALT)"; KDF_T="$(_hf KDF_T)"; KDF_M="$(_hf KDF_M)"
+      KDF_P="$(_hf KDF_P)";       KEY_LEN="$(_hf KEY_LEN)"; IV="$(_hf IV)"
+      STORED_HMAC="$(_hf HMAC)"
+      [[ -z "$ALGO" || -z "$KDF_SALT" || -z "$IV" ]] && {
+        err "Vault header missing required fields (ALGO / KDF_SALT / IV)"
+        exit 1
+      }
+    else
+      INTEGRITY="$(_hf INTEGRITY)"
+      LABEL="${LABEL:-none}"
+    fi
+    [[ -z "$ORIG_NAME" ]] && { err "Vault header missing ORIG field"; exit 1; }
+  fi
+
+  # ── age/gpg: infer from filename ───────────────────────────────────────────
+  if [[ "$METHOD" == "age" || "$METHOD" == "gpg" ]]; then
+    need "$METHOD" "sudo pacman -S $([ "$METHOD" = age ] && echo age || echo gnupg)"
+    INNER="${INPUT%.*}"
+    case "$INNER" in
+      *.tar.gz)    COMP="gzip";   HAS_TAR=true ;;
+      *.tar.bz2)   COMP="bzip2";  HAS_TAR=true ;;
+      *.tar.xz)    COMP="xz";     HAS_TAR=true ;;
+      *.tar.zst)   COMP="zstd";   HAS_TAR=true ;;
+      *.tar.lz4)   COMP="lz4";    HAS_TAR=true ;;
+      *.tar.br)    COMP="brotli"; HAS_TAR=true ;;
+      *.tar.lzo)   COMP="lzo";    HAS_TAR=true ;;
+      *.tar.7z)    COMP="7z";     HAS_TAR=true ;;
+      *.tar.zlib)  COMP="zlib";   HAS_TAR=true ;;
+      *.tar)       COMP="none";   HAS_TAR=true ;;
+      *)           COMP="none";   HAS_TAR=false ;;
+    esac
+    ALGO="$METHOD"; AUTH="yes"
+    LABEL="$METHOD"
+    ORIG_NAME="$(basename "${INNER%.tar*}")"
+    [[ "$HAS_TAR" == false ]] && ORIG_NAME="$(basename "$INNER")"
+  fi
+
+  # ── Always sanitize ORIG_NAME ─────────────────────────────────────────────
+  ORIG_NAME="$(sanitize_name "$ORIG_NAME")"
+
+  # ── Decompressor availability ─────────────────────────────────────────────
+  case "$COMP" in
+    gzip)   need gunzip  "sudo pacman -S gzip"   ;;
+    bzip2)  need bunzip2 "sudo pacman -S bzip2"  ;;
+    xz)     need unxz    "sudo pacman -S xz"     ;;
+    zstd)   need zstd    "sudo pacman -S zstd"   ;;
+    lz4)    need lz4     "sudo pacman -S lz4"    ;;
+    brotli) need brotli  "sudo pacman -S brotli" ;;
+    lzo)    need lzop    "sudo pacman -S lzop"   ;;
+    7z)     need 7z      "sudo pacman -S p7zip"  ;;
+    zlib)   need python3 "sudo pacman -S python" ;;
+  esac
+
+  # ── Info box — shown BEFORE password so you know what you're opening ───────
+  sep
+  echo -e "${SAPPHIRE}${BOLD}  ⬡  File details${NC}"
+  label "  file      :  " "$(basename "$INPUT")  ($(du -sh "$INPUT" | cut -f1))"
+  label "  method    :  " "$METHOD"
+  label "  cipher    :  " "${LABEL:-$ALGO}"
+  label "  auth      :  " "$AUTH"
+  label "  compress  :  " "${COMP:-unknown}"
+  label "  tar wrap  :  " "$HAS_TAR"
+  label "  original  :  " "$ORIG_NAME"
+  [[ -n "$FTYPE" ]] && label "  type      :  " "$FTYPE"
+  if [[ "$AUTH" == "yes" && "$METHOD" == "vault" && -n "$STORED_HMAC" ]]; then
+    label "  HMAC      :  " "${STORED_HMAC:0:16}…  (covers all header fields + ciphertext)"
+  fi
+  echo
+  echo -e "${YELLOW}  ⚠  Only decrypt files from sources you trust.${NC}"
+  echo -e "${YELLOW}  ⚠  Output will land in: ${BOLD}$(pwd)${NC}"
+
+  if [[ "$ALGO" == "none" ]]; then
+    echo
+    warn "This vault was created WITHOUT encryption — data is plain."
+    printf "${PEACH}  Continue? [y/N]  ${NC}"; read -r ans
+    [[ "$ans" =~ ^[yY]$ ]] || { info "Aborted."; exit 0; }
+  fi
+  sep; echo
+
+  # ── Password ───────────────────────────────────────────────────────────────
+  PASSWD=""
+  if [[ "$METHOD" != "age" && "${ALGO:-x}" != "none" ]]; then
+    printf "${LAVENDER}${BOLD}  Password :  ${NC}"; read -rs PASSWD; echo
+    [[ -z "$PASSWD" ]] && { err "Password cannot be empty"; exit 1; }
+    echo
+  elif [[ "$METHOD" == "age" ]]; then
+    info "age will prompt for passphrase during decryption"; echo
+  fi
+
+  VAULT_TMP="$(mktemp -d /tmp/vault.XXXXXX)"
+  chmod 700 "$VAULT_TMP"
+  ORIG_CWD="$(pwd)"
+
+  # ══════════════════════════════════════════════════════════════════════════
+  step "1 / 4  Read payload"
+  # ══════════════════════════════════════════════════════════════════════════
+  PAYLOAD="${VAULT_TMP}/payload.enc"
+  if [[ "$METHOD" == "vault" ]]; then
+    OFFSET=$(( 8 + HDR_LEN ))
+    dd if="$INPUT" bs=1 skip="$OFFSET" of="$PAYLOAD" 2>/dev/null \
+      || { err "Failed to read payload from vault"; exit 1; }
+  else
+    cp "$INPUT" "$PAYLOAD"
+  fi
+  ok "$(du -sh "$PAYLOAD" | cut -f1)"
+
+  # ══════════════════════════════════════════════════════════════════════════
+  step "2 / 4  Verify + Decrypt"
+  # ══════════════════════════════════════════════════════════════════════════
+  DECRYPTED="${VAULT_TMP}/data.dec"
+  ENC_KEY=""; HMAC_KEY=""
+
+  case "$METHOD" in
+    vault)
+      if [[ "${ALGO:-none}" == "none" ]]; then
+        # Plain vault — SHA-256 integrity check
+        if [[ -n "$INTEGRITY" ]]; then
+          info "Verifying SHA-256 integrity..."
+          COMPUTED=$(sha256sum "$PAYLOAD" | awk '{print $1}')
+          [[ "$COMPUTED" == "$INTEGRITY" ]] \
+            && ok "SHA-256 verified" \
+            || { err "SHA-256 MISMATCH — data corrupted or tampered"; exit 1; }
+        fi
+        cp "$PAYLOAD" "$DECRYPTED"
+        ok "no decryption (plain vault)"
+
+      else
+        # OpenSSL vault — re-derive keys then verify HMAC before decrypting
+        need argon2 "sudo pacman -S argon2"
+
+        info "Argon2id re-derive  (t=${KDF_T}, m=2^${KDF_M} KiB, p=${KDF_P}) ..."
+        derive_key "$PASSWD" "$KDF_SALT" "$KDF_T" "$KDF_M" "$KDF_P"
+        ENC_KEY="${RAW_KEY:0:$KEY_LEN}"
+        HMAC_KEY="${RAW_KEY:64:64}"
+        RAW_KEY=""
+
+        if [[ "$AUTH" == "yes" ]]; then
+          if [[ -z "$STORED_HMAC" ]]; then
+            err "Vault claims AUTH=yes but HMAC field is absent — refusing to decrypt."
+            exit 1
+          fi
+
+          # Reconstruct the header as it was BEFORE the HMAC line was appended.
+          # The vault header on disk = (header_without_HMAC) + "HMAC=...\n"
+          # HMAC was computed over: header_without_HMAC || ciphertext
+          HDR_NO_HMAC=$(printf '%s\n' "$HDR" | grep -v '^HMAC=')
+
+          info "Verifying HMAC-SHA256 over header fields + ciphertext..."
+          COMPUTED_HMAC=$(
+            { printf '%s\n' "$HDR_NO_HMAC"; cat "$PAYLOAD"; } \
+            | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${HMAC_KEY}" \
+            | awk '{print $NF}'
+          )
+
+          if [[ "$COMPUTED_HMAC" == "$STORED_HMAC" ]]; then
+            ok "HMAC verified — header fields + ciphertext are authentic and untampered"
+          else
+            err "HMAC VERIFICATION FAILED"
+            err "The header or ciphertext has been modified, or the password is wrong."
+            err "Refusing to decrypt."
+            exit 1
+          fi
+        fi
+
+        openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt \
+          -in "$PAYLOAD" -out "$DECRYPTED" 2>/dev/null \
+          || { err "Decryption failed — wrong password or corrupted data"; exit 1; }
+        ok "decrypted"
+      fi
+      ;;
+
+    age)
+      echo
+      age -d -o "$DECRYPTED" "$PAYLOAD" \
+        || { err "age decryption failed"; exit 1; }
+      echo
+      ok "decrypted  (ChaCha20-Poly1305 verified by age)"
+      ;;
+
+    gpg)
+      printf '%s' "$PASSWD" | gpg \
+        --batch --passphrase-fd 0 --pinentry-mode loopback \
+        --no-symkey-cache -o "$DECRYPTED" -d "$PAYLOAD" 2>/dev/null \
+        || { err "GPG decryption failed — wrong password or corrupted data"; exit 1; }
+      ok "decrypted  (GPG integrity verified)"
+      ;;
+  esac
+
+  # ══════════════════════════════════════════════════════════════════════════
+  step "3 / 4  Decompress  ($COMP)"
+  # ══════════════════════════════════════════════════════════════════════════
+  DECOMPRESSED="$DECRYPTED"
+
+  if [[ "$COMP" != "none" ]]; then
+    case "$COMP" in
+      gzip)
+        mv "$DECRYPTED" "${VAULT_TMP}/data.tar.gz"
+        gunzip "${VAULT_TMP}/data.tar.gz"; DECOMPRESSED="${VAULT_TMP}/data.tar" ;;
+      bzip2)
+        mv "$DECRYPTED" "${VAULT_TMP}/data.tar.bz2"
+        bunzip2 "${VAULT_TMP}/data.tar.bz2"; DECOMPRESSED="${VAULT_TMP}/data.tar" ;;
+      xz)
+        mv "$DECRYPTED" "${VAULT_TMP}/data.tar.xz"
+        unxz "${VAULT_TMP}/data.tar.xz"; DECOMPRESSED="${VAULT_TMP}/data.tar" ;;
+      zstd)
+        zstd -d -q "$DECRYPTED" -o "${VAULT_TMP}/data.tar"
+        DECOMPRESSED="${VAULT_TMP}/data.tar" ;;
+      lz4)
+        lz4 -d -q "$DECRYPTED" "${VAULT_TMP}/data.tar" >/dev/null 2>&1
+        DECOMPRESSED="${VAULT_TMP}/data.tar" ;;
+      brotli)
+        brotli -d "$DECRYPTED" -o "${VAULT_TMP}/data.tar"
+        DECOMPRESSED="${VAULT_TMP}/data.tar" ;;
+      lzo)
+        lzop -d -o "${VAULT_TMP}/data.tar" "$DECRYPTED"
+        DECOMPRESSED="${VAULT_TMP}/data.tar" ;;
+      7z)
+        mkdir -p "${VAULT_TMP}/7z_out"
+        mv "$DECRYPTED" "${VAULT_TMP}/data.tar.7z"
+        7z e "-o${VAULT_TMP}/7z_out" "${VAULT_TMP}/data.tar.7z" >/dev/null 2>&1
+        DECOMPRESSED="${VAULT_TMP}/7z_out/data.tar" ;;
+      zlib)
+        python3 -c "import sys,zlib; sys.stdout.buffer.write(zlib.decompress(sys.stdin.buffer.read()))" \
+          < "$DECRYPTED" > "${VAULT_TMP}/data.tar"
+        DECOMPRESSED="${VAULT_TMP}/data.tar" ;;
+    esac
+    ok "done"
+  else
+    ok "skipped"
+  fi
+
+  # ══════════════════════════════════════════════════════════════════════════
+  step "4 / 4  Extract"
+  # ══════════════════════════════════════════════════════════════════════════
+
+  # Output path — always rooted in ORIG_CWD regardless of archive contents
+  OUT_PATH="${ORIG_CWD}/${ORIG_NAME}"
+  if [[ -e "$OUT_PATH" ]]; then
+    OUT_PATH="${ORIG_CWD}/${ORIG_NAME}_restored_$(date +%s)"
+    warn "Path exists — saving as: $(basename "$OUT_PATH")"
+  fi
+
+  if [[ "$HAS_TAR" == true ]]; then
+    check_tar_safety "$DECOMPRESSED"
+
+    STAGE="${VAULT_TMP}/stage"
+    mkdir -p "$STAGE"
+    # GNU tar strips leading / by default (safe)
+    # -C extracts into our private staging dir only
+    tar -xf "$DECOMPRESSED" -C "$STAGE" 2>/dev/null \
+      || { err "Extraction failed — archive may be corrupted"; exit 1; }
+
+    EXPECTED="${STAGE}/${ORIG_NAME}"
+    if [[ -e "$EXPECTED" ]]; then
+      mv "$EXPECTED" "$OUT_PATH"
+    else
+      ITEMS=( "${STAGE}"/* )
+      if (( ${#ITEMS[@]} == 1 )); then
+        mv "${ITEMS[0]}" "$OUT_PATH"
+      elif (( ${#ITEMS[@]} > 1 )); then
+        mkdir -p "$OUT_PATH"; mv "${STAGE}"/* "$OUT_PATH/"
+      else
+        err "Archive appears to be empty"; exit 1
+      fi
+    fi
+  else
+    # Single file, no tar — move directly to CWD
+    mv "$DECOMPRESSED" "$OUT_PATH"
+  fi
+
+  ok "restored  →  ${BLUE}${BOLD}${OUT_PATH}${NC}"
+
+  # ── Summary ────────────────────────────────────────────────────────────────
+  echo
+  sep
+  echo -e "${SAPPHIRE}${BOLD}  ⬡  Done${NC}"
+  label "  restored  :  " "$(du -sh "$OUT_PATH" 2>/dev/null | cut -f1)"
+  label "  location  :  " "$OUT_PATH"
+  echo
+  echo -e "${GREEN}${BOLD}  🔓  Unsealed.${NC}"
+  echo
+}
+
+main "$@"
