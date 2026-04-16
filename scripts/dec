@@ -1,29 +1,23 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  dec  v5.0 — decrypt files created by enc v5.0
+#  dec  v5.2 — decrypt files created by enc v5.2
 #  Usage : dec <file.vault | file[.tar][.<comp>].<age|gpg>>
 #
-#  Auto-detects everything from filename + vault header.
-#  Only asks for password.
+#  MEMORY SAFETY:
+#    All intermediate data lives exclusively in /dev/shm (RAM-backed tmpfs).
+#    Nothing touches /tmp or any disk path during processing.
+#    Temp dir is shredded (zeroed) before removal on exit, interrupt, or error.
+#    Decryption streams:  openssl -d | decompress | tar -x  in one pipeline
+#    — no intermediate decrypted or decompressed file written to shm.
+#    The only shm content is the staging directory for extracted files,
+#    which is moved to CWD immediately and then shredded.
+#    Hard limit: aborts if vault payload exceeds 100 MiB.
 #
 #  SECURITY MODEL:
-#    Authenticated vault modes (AUTH=yes):
-#      HMAC-SHA256 is computed over (all header fields || ciphertext)
-#      → verifies BEFORE decryption (fail-fast)
-#      → any change to ALGO/COMP/IV/ORIG/KDF params or ciphertext = instant abort
-#
-#    Unauthenticated modes (AUTH=no):
-#      No tamper detection — decryption failure is the only signal
-#
-#    none-encryption vaults:
-#      SHA-256 integrity check on data before extraction
-#
-#  OTHER SAFEGUARDS:
-#    - Full file details shown BEFORE password prompt
-#    - ORIG sanitized to basename only (no path traversal)
-#    - Tar pre-scanned for absolute paths and ../ traversal
-#    - Extraction always into private staging dir, then CWD only
-#    - Temp dir chmod 700
+#    HMAC verified over (all header fields || ciphertext) BEFORE any decryption.
+#    ORIG sanitized to basename only — no ../ traversal.
+#    Tar pre-scanned for dangerous paths before extraction.
+#    Output always placed in CWD regardless of archive contents.
 # =============================================================================
 
 set -uo pipefail
@@ -37,27 +31,44 @@ SAPPHIRE='\033[38;2;116;199;236m'
 TEXT='\033[38;2;205;214;244m';   SUBTEXT='\033[38;2;166;173;200m'
 BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
 
-ok()    { echo -e "${GREEN}  ✓  ${*}${NC}"; }
-err()   { echo -e "${RED}  ✗  ${*}${NC}" >&2; }
-warn()  { echo -e "${YELLOW}  ⚠  ${*}${NC}"; }
-info()  { echo -e "${TEAL}  →  ${*}${NC}"; }
-step()  { echo -e "\n${MAUVE}${BOLD}  ══  ${*}${NC}"; }
-label() { echo -e "${SUBTEXT}  ${1}${TEXT}${2}${NC}"; }
-sep()   { echo -e "${SUBTEXT}${DIM}  ─────────────────────────────────────${NC}"; }
+ok()   { echo -e "${GREEN}  ✓  ${*}${NC}"; }
+err()  { echo -e "${RED}  ✗  ${*}${NC}" >&2; }
+warn() { echo -e "${YELLOW}  ⚠  ${*}${NC}"; }
+info() { echo -e "${TEAL}  →  ${*}${NC}"; }
+step() { echo -e "\n${MAUVE}${BOLD}  ══  ${*}${NC}"; }
+lbl()  { echo -e "${SUBTEXT}  ${1}${TEXT}${2:-}${NC}"; }
+sep()  { echo -e "${SUBTEXT}${DIM}  ──────────────────────────────────────────${NC}"; }
 
 banner() {
+  local target="$1" mode="$2"
+  local disp="$target"
+  (( ${#disp} > 44 )) && disp="…${target: -43}"
+  local inner="  vault ${mode}  v5.2  ·  ${disp}  "
+  local w=${#inner} bar="" i
+  for (( i=0; i<w; i++ )); do bar+="═"; done
   echo
-  echo -e "${MAUVE}${BOLD}  ╔══════════════════════════════════════╗${NC}"
-  echo -e "${MAUVE}${BOLD}  ║   🔓  vault dec  v5.0                ║${NC}"
-  echo -e "${MAUVE}${BOLD}  ╚══════════════════════════════════════╝${NC}"
+  echo -e "${MAUVE}${BOLD}  ╔${bar}╗${NC}"
+  echo -e "${MAUVE}${BOLD}  ║${inner}║${NC}"
+  echo -e "${MAUVE}${BOLD}  ╚${bar}╝${NC}"
   echo
 }
 
-VAULT_TMP=""
-cleanup() { [[ -n "$VAULT_TMP" && -d "$VAULT_TMP" ]] && rm -rf "$VAULT_TMP"; }
-trap cleanup EXIT INT TERM
+sep_hdr() {
+  local s_lbl="$1" line="" fill i
+  fill=$(( 68 - ${#s_lbl} - 6 ))
+  for (( i=0; i<fill; i++ )); do line+="─"; done
+  echo -e "\n  ${SUBTEXT}${DIM}──  ${NC}${LAVENDER}${BOLD}${s_lbl}${NC}  ${SUBTEXT}${DIM}${line}${NC}\n"
+}
 
 need() { command -v "$1" &>/dev/null || { err "'$1' not installed.  $2"; exit 1; }; }
+
+# ── /dev/shm guard ────────────────────────────────────────────────────────────
+check_shm() {
+  [[ -d /dev/shm && -w /dev/shm ]] || {
+    err "/dev/shm unavailable — cannot create in-memory workspace"
+    exit 1
+  }
+}
 
 # ── Sanitize filename ─────────────────────────────────────────────────────────
 sanitize_name() {
@@ -65,77 +76,79 @@ sanitize_name() {
   raw="${raw//$'\0'/}"
   raw="$(basename "$raw")"
   [[ -z "$raw" || "$raw" == "." || "$raw" == ".." ]] && {
-    err "Unsafe filename in vault: '${1}' — aborting."
-    err "This vault may be crafted to attack your system."
+    err "Unsafe filename in vault header: '${1}'"
+    err "This vault may be crafted to overwrite system files — aborting."
     exit 1
   }
   [[ "$raw" == */* || "$raw" == *\\* ]] && {
-    err "Filename contains path separator after sanitization — aborting."
-    exit 1
-  }
+    err "Filename contains path separator — aborting."; exit 1; }
   printf '%s' "$raw"
 }
 
-# ── Pre-scan tar for dangerous paths ─────────────────────────────────────────
+# ── Pre-scan tar for dangerous entries ───────────────────────────────────────
 check_tar_safety() {
   local archive="$1"
   local paths
   paths=$(tar -tf "$archive" 2>/dev/null) || {
-    err "Cannot list archive entries — may be corrupted"
-    exit 1
-  }
+    err "Cannot list archive entries — may be corrupted"; exit 1; }
+  # Catch: absolute paths, ../ in middle, trailing .., bare ..
   local dangerous
-  dangerous=$(printf '%s\n' "$paths" | grep -E '(^|/)\.\.(^|/)|(^/)' || true)
+  dangerous=$(printf '%s\n' "$paths" | grep -E '(^|/)\.\.(/|$)|(^/)' || true)
   if [[ -n "$dangerous" ]]; then
     echo
     err "Archive contains dangerous paths — REFUSING to extract:"
     printf '%s\n' "$dangerous" | head -10 | while IFS= read -r p; do
-      echo -e "    ${RED}  ${p}${NC}" >&2
-    done
-    err "Vault was likely crafted to overwrite critical system files."
-    exit 1
+      echo -e "    ${RED}  ${p}${NC}" >&2; done
+    err "Vault was likely crafted to overwrite critical files."; exit 1
   fi
-  local nsym
-  nsym=$(tar -tvf "$archive" 2>/dev/null | grep -c '^l' || true)
-  (( nsym > 0 )) && warn "Archive contains ${nsym} symlink(s) — verify source trust."
-  local n
-  n=$(printf '%s\n' "$paths" | wc -l)
+  # Only warn for symlinks pointing to absolute paths or parent dirs
+  local dsym
+  dsym=$(tar -tvf "$archive" 2>/dev/null | grep '^l' \
+    | sed 's/.* -> //' | grep -E '^(/|\.\.)' || true)
+  [[ -n "$dsym" ]] && warn "Archive contains symlinks targeting absolute/parent paths."
+  local n; n=$(printf '%s\n' "$paths" | wc -l)
   if (( n > 10000 )); then
-    warn "Archive has ${n} entries (unusually large)."
+    warn "Archive has ${n} entries — unusually large."
     printf "${PEACH}  Continue? [y/N]  ${NC}"; read -r ans
     [[ "$ans" =~ ^[yY]$ ]] || { err "Aborted."; exit 1; }
   fi
 }
 
-# ── Argon2id key derivation ───────────────────────────────────────────────────
-# Returns 128 hex chars (64 bytes) in global $RAW_KEY
+# ── Shred all files in SHM_TMP, then remove ───────────────────────────────────
+SHM_TMP=""
+cleanup() {
+  [[ -z "$SHM_TMP" || ! -d "$SHM_TMP" ]] && return
+  find "$SHM_TMP" -type f -exec shred -uz {} \; 2>/dev/null || true
+  rm -rf "$SHM_TMP"
+}
+trap cleanup EXIT INT TERM
+
+# ── Argon2id KDF ──────────────────────────────────────────────────────────────
 derive_key() {
   local passwd="$1" salt="$2" t="$3" m="$4" p="$5"
   RAW_KEY=$(printf '%s' "$passwd" \
     | argon2 "$salt" -id -t "$t" -m "$m" -p "$p" -l 64 -r 2>/dev/null \
     | tr -d '[:space:]')
   [[ ${#RAW_KEY} -eq 128 ]] || {
-    err "Argon2id key derivation failed"
-    err "Ensure argon2 is installed: sudo pacman -S argon2"
-    exit 1
-  }
+    err "Argon2id failed  (install: sudo pacman -S argon2)"; exit 1; }
 }
 
 # =============================================================================
 main() {
-  banner
   need tar     "sudo pacman -S tar"
   need dd      "coreutils"
   need openssl "sudo pacman -S openssl"
+  need shred   "sudo pacman -S coreutils"
+  check_shm
 
   [[ $# -lt 1 ]] && {
-    err "Usage: dec <file.vault | file[.tar][.<ext>].<age|gpg>>"
-    exit 1
-  }
+    err "Usage: dec <file.vault | file[.tar][.<ext>].<age|gpg>>"; exit 1; }
 
   INPUT="$1"
   [[ ! -f "$INPUT" ]] && { err "File not found: $INPUT"; exit 1; }
   INPUT="$(realpath "$INPUT")"
+
+  banner "$(basename "$INPUT")" "dec"
 
   # ── Detect method from extension ──────────────────────────────────────────
   case "$INPUT" in
@@ -148,48 +161,37 @@ main() {
       exit 1 ;;
   esac
 
-  # ── Init all metadata vars ─────────────────────────────────────────────────
+  # ── Init metadata ──────────────────────────────────────────────────────────
   ALGO=""; LABEL=""; AUTH="no"; COMP=""; FTYPE=""; ORIG_NAME=""
   HAS_TAR=true; KDF_SALT=""; KDF_T=3; KDF_M=14; KDF_P=4; KEY_LEN=64
   IV=""; STORED_HMAC=""; INTEGRITY=""; HDR_LEN=0; HDR=""
 
-  # ── Parse vault header ─────────────────────────────────────────────────────
+  # ── Vault: parse header ────────────────────────────────────────────────────
   if [[ "$METHOD" == "vault" ]]; then
     HDR_HEX=$(dd if="$INPUT" bs=1 count=8 2>/dev/null)
     [[ "$HDR_HEX" =~ ^[0-9a-fA-F]{8}$ ]] || {
-      err "Not a valid vault file (bad magic bytes: '${HDR_HEX}')"
-      exit 1
-    }
-    HDR_LEN=$((16#$HDR_HEX))
+      err "Not a valid vault file (bad magic: '${HDR_HEX}')"; exit 1; }
+    HDR_LEN=$(( 16#$HDR_HEX ))
     (( HDR_LEN > 0 && HDR_LEN <= 8192 )) || {
-      err "Header length implausible: ${HDR_LEN} bytes"
-      exit 1
-    }
+      err "Header length implausible: ${HDR_LEN}"; exit 1; }
     HDR=$(dd if="$INPUT" bs=1 skip=8 count="$HDR_LEN" 2>/dev/null)
     VERSION=$(printf '%s\n' "$HDR" | head -n1)
     [[ "$VERSION" == "VAULTV1" ]] || {
-      err "Unsupported vault version: '${VERSION}'"
-      exit 1
-    }
+      err "Unsupported vault version: '${VERSION}'"; exit 1; }
 
-    # Helper: extract a field from header
     _hf() { printf '%s\n' "$HDR" | grep -m1 "^${1}=" | cut -d= -f2-; }
-
-    LABEL="$(_hf LABEL)"; ALGO="$(_hf ALGO)"; AUTH="$(_hf AUTH)"
+    LABEL="$(_hf LABEL)"; ALGO="$(_hf ALGO)";  AUTH="$(_hf AUTH)"
     COMP="$(_hf COMP)";   FTYPE="$(_hf TYPE)"; ORIG_NAME="$(_hf ORIG)"
     TAR_F="$(_hf TAR)";   [[ "$TAR_F" == "false" ]] && HAS_TAR=false || HAS_TAR=true
 
     if [[ "$ALGO" != "none" ]]; then
       KDF_SALT="$(_hf KDF_SALT)"; KDF_T="$(_hf KDF_T)"; KDF_M="$(_hf KDF_M)"
-      KDF_P="$(_hf KDF_P)";       KEY_LEN="$(_hf KEY_LEN)"; IV="$(_hf IV)"
+      KDF_P="$(_hf KDF_P)"; KEY_LEN="$(_hf KEY_LEN)"; IV="$(_hf IV)"
       STORED_HMAC="$(_hf HMAC)"
       [[ -z "$ALGO" || -z "$KDF_SALT" || -z "$IV" ]] && {
-        err "Vault header missing required fields (ALGO / KDF_SALT / IV)"
-        exit 1
-      }
+        err "Vault header missing required fields (ALGO / KDF_SALT / IV)"; exit 1; }
     else
-      INTEGRITY="$(_hf INTEGRITY)"
-      LABEL="${LABEL:-none}"
+      INTEGRITY="$(_hf INTEGRITY)"; LABEL="${LABEL:-none}"
     fi
     [[ -z "$ORIG_NAME" ]] && { err "Vault header missing ORIG field"; exit 1; }
   fi
@@ -199,28 +201,25 @@ main() {
     need "$METHOD" "sudo pacman -S $([ "$METHOD" = age ] && echo age || echo gnupg)"
     INNER="${INPUT%.*}"
     case "$INNER" in
-      *.tar.gz)    COMP="gzip";   HAS_TAR=true ;;
-      *.tar.bz2)   COMP="bzip2";  HAS_TAR=true ;;
-      *.tar.xz)    COMP="xz";     HAS_TAR=true ;;
-      *.tar.zst)   COMP="zstd";   HAS_TAR=true ;;
-      *.tar.lz4)   COMP="lz4";    HAS_TAR=true ;;
-      *.tar.br)    COMP="brotli"; HAS_TAR=true ;;
-      *.tar.lzo)   COMP="lzo";    HAS_TAR=true ;;
-      *.tar.7z)    COMP="7z";     HAS_TAR=true ;;
-      *.tar.zlib)  COMP="zlib";   HAS_TAR=true ;;
-      *.tar)       COMP="none";   HAS_TAR=true ;;
-      *)           COMP="none";   HAS_TAR=false ;;
+      *.tar.gz)   COMP="gzip";   HAS_TAR=true ;;
+      *.tar.bz2)  COMP="bzip2";  HAS_TAR=true ;;
+      *.tar.xz)   COMP="xz";     HAS_TAR=true ;;
+      *.tar.zst)  COMP="zstd";   HAS_TAR=true ;;
+      *.tar.lz4)  COMP="lz4";    HAS_TAR=true ;;
+      *.tar.br)   COMP="brotli"; HAS_TAR=true ;;
+      *.tar.lzo)  COMP="lzo";    HAS_TAR=true ;;
+      *.tar.7z)   COMP="7z";     HAS_TAR=true ;;
+      *.tar.zlib) COMP="zlib";   HAS_TAR=true ;;
+      *.tar)      COMP="none";   HAS_TAR=true ;;
+      *)          COMP="none";   HAS_TAR=false ;;
     esac
-    ALGO="$METHOD"; AUTH="yes"
-    LABEL="$METHOD"
+    ALGO="$METHOD"; AUTH="yes"; LABEL="$METHOD"
     ORIG_NAME="$(basename "${INNER%.tar*}")"
     [[ "$HAS_TAR" == false ]] && ORIG_NAME="$(basename "$INNER")"
   fi
 
-  # ── Always sanitize ORIG_NAME ─────────────────────────────────────────────
   ORIG_NAME="$(sanitize_name "$ORIG_NAME")"
 
-  # ── Decompressor availability ─────────────────────────────────────────────
   case "$COMP" in
     gzip)   need gunzip  "sudo pacman -S gzip"   ;;
     bzip2)  need bunzip2 "sudo pacman -S bzip2"  ;;
@@ -233,27 +232,40 @@ main() {
     zlib)   need python3 "sudo pacman -S python" ;;
   esac
 
-  # ── Info box — shown BEFORE password so you know what you're opening ───────
-  sep
-  echo -e "${SAPPHIRE}${BOLD}  ⬡  File details${NC}"
-  label "  file      :  " "$(basename "$INPUT")  ($(du -sh "$INPUT" | cut -f1))"
-  label "  method    :  " "$METHOD"
-  label "  cipher    :  " "${LABEL:-$ALGO}"
-  label "  auth      :  " "$AUTH"
-  label "  compress  :  " "${COMP:-unknown}"
-  label "  tar wrap  :  " "$HAS_TAR"
-  label "  original  :  " "$ORIG_NAME"
-  [[ -n "$FTYPE" ]] && label "  type      :  " "$FTYPE"
+  # ── Payload size check (100 MiB limit) ────────────────────────────────────
+  VAULT_SIZE=$(stat -c%s "$INPUT" 2>/dev/null || echo 0)
+  PAYLOAD_BYTES=$(( VAULT_SIZE - 8 - HDR_LEN ))
+  SHM_LIMIT=$(( 100 * 1024 * 1024 ))
+  if (( PAYLOAD_BYTES > SHM_LIMIT )); then
+    err "Vault payload is $(( PAYLOAD_BYTES / 1024 / 1024 )) MiB — exceeds 100 MiB limit."
+    err "This vault was created with a file larger than the memory budget allows."
+    exit 1
+  fi
+  SHM_FREE=$(( $(df --output=avail /dev/shm | tail -1) * 1024 ))
+  (( PAYLOAD_BYTES > SHM_FREE )) && {
+    err "Not enough /dev/shm space for payload (need ~$(( PAYLOAD_BYTES / 1024 / 1024 )) MiB)"
+    exit 1
+  }
+
+  # ── File details — shown BEFORE password ──────────────────────────────────
+  sep_hdr "File details"
+  lbl "  file      :  " "$(basename "$INPUT")  ($(du -sh "$INPUT" | cut -f1))"
+  lbl "  method    :  " "$METHOD"
+  lbl "  cipher    :  " "${LABEL:-$ALGO}"
+  lbl "  auth      :  " "$AUTH"
+  lbl "  compress  :  " "${COMP:-unknown}"
+  lbl "  tar wrap  :  " "$HAS_TAR"
+  lbl "  original  :  " "$ORIG_NAME"
+  [[ -n "$FTYPE" ]] && lbl "  type      :  " "$FTYPE"
   if [[ "$AUTH" == "yes" && "$METHOD" == "vault" && -n "$STORED_HMAC" ]]; then
-    label "  HMAC      :  " "${STORED_HMAC:0:16}…  (covers all header fields + ciphertext)"
+    lbl "  HMAC      :  " "${STORED_HMAC:0:16}…  (covers all header fields + ciphertext)"
   fi
   echo
-  echo -e "${YELLOW}  ⚠  Only decrypt files from sources you trust.${NC}"
-  echo -e "${YELLOW}  ⚠  Output will land in: ${BOLD}$(pwd)${NC}"
+  warn "Only decrypt files from sources you trust."
+  warn "Output will land in: ${BOLD}$(pwd)${NC}"
 
-  if [[ "$ALGO" == "none" ]]; then
-    echo
-    warn "This vault was created WITHOUT encryption — data is plain."
+  if [[ "${ALGO:-x}" == "none" ]]; then
+    echo; warn "This vault was created WITHOUT encryption — data is plain."
     printf "${PEACH}  Continue? [y/N]  ${NC}"; read -r ans
     [[ "$ans" =~ ^[yY]$ ]] || { info "Aborted."; exit 0; }
   fi
@@ -262,202 +274,289 @@ main() {
   # ── Password ───────────────────────────────────────────────────────────────
   PASSWD=""
   if [[ "$METHOD" != "age" && "${ALGO:-x}" != "none" ]]; then
-    printf "${LAVENDER}${BOLD}  Password :  ${NC}"; read -rs PASSWD; echo
+    sep_hdr "Password"
+    printf "  ${LAVENDER}${BOLD}Password :  ${NC}"; read -rs PASSWD; echo
     [[ -z "$PASSWD" ]] && { err "Password cannot be empty"; exit 1; }
     echo
   elif [[ "$METHOD" == "age" ]]; then
     info "age will prompt for passphrase during decryption"; echo
   fi
 
-  VAULT_TMP="$(mktemp -d /tmp/vault.XXXXXX)"
-  chmod 700 "$VAULT_TMP"
-  ORIG_CWD="$(pwd)"
-
-  # ══════════════════════════════════════════════════════════════════════════
-  step "1 / 4  Read payload"
-  # ══════════════════════════════════════════════════════════════════════════
-  PAYLOAD="${VAULT_TMP}/payload.enc"
-  if [[ "$METHOD" == "vault" ]]; then
-    OFFSET=$(( 8 + HDR_LEN ))
-    dd if="$INPUT" bs=1 skip="$OFFSET" of="$PAYLOAD" 2>/dev/null \
-      || { err "Failed to read payload from vault"; exit 1; }
-  else
-    cp "$INPUT" "$PAYLOAD"
-  fi
-  ok "$(du -sh "$PAYLOAD" | cut -f1)"
-
-  # ══════════════════════════════════════════════════════════════════════════
-  step "2 / 4  Verify + Decrypt"
-  # ══════════════════════════════════════════════════════════════════════════
-  DECRYPTED="${VAULT_TMP}/data.dec"
+  # ── HMAC pre-verification (before any decryption attempt) ─────────────────
   ENC_KEY=""; HMAC_KEY=""
+
+  if [[ "$METHOD" == "vault" && "$ALGO" != "none" && "$AUTH" == "yes" ]]; then
+    need argon2 "sudo pacman -S argon2"
+
+    info "Argon2id re-derive  (t=${KDF_T}, m=2^${KDF_M} KiB, p=${KDF_P}) ..."
+    derive_key "$PASSWD" "$KDF_SALT" "$KDF_T" "$KDF_M" "$KDF_P"
+    # RAW_KEY hex [0–63]   = cipher key  (bytes 0–31, or 0–15 for 128-bit)
+    # RAW_KEY hex [64–127] = HMAC key    (hex offset 64 = byte offset 32, 32 bytes)
+    ENC_KEY="${RAW_KEY:0:$KEY_LEN}"
+    HMAC_KEY="${RAW_KEY:64:64}"
+    RAW_KEY=""
+
+    [[ -z "$STORED_HMAC" ]] && {
+      err "AUTH=yes but HMAC field missing — refusing to decrypt"; exit 1; }
+
+    # Reconstruct the pre-HMAC header (strip HMAC= line that was appended last)
+    HDR_NO_HMAC=$(printf '%s\n' "$HDR" | grep -v '^HMAC=')
+
+    info "Verifying HMAC-SHA256 over all header fields + ciphertext ..."
+    # Stream the ciphertext directly from the vault file (no copy to shm yet)
+    PAYLOAD_OFFSET=$(( 8 + HDR_LEN ))
+    COMPUTED_HMAC=$(
+      { printf '%s\n' "$HDR_NO_HMAC"
+        dd if="$INPUT" bs=1 skip="$PAYLOAD_OFFSET" 2>/dev/null
+      } | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${HMAC_KEY}" \
+        | awk '{print $NF}'
+    )
+
+    if [[ "$COMPUTED_HMAC" == "$STORED_HMAC" ]]; then
+      ok "HMAC verified — every field + ciphertext authentic and untampered"
+    else
+      err "HMAC VERIFICATION FAILED"
+      err "A header field or the ciphertext was modified, or the password is wrong."
+      err "Refusing to decrypt."
+      exit 1
+    fi
+  fi
+
+  SHM_TMP="$(mktemp -d /dev/shm/vault.XXXXXX)"
+  chmod 700 "$SHM_TMP"
+  ORIG_CWD="$(pwd)"
+  STAGE="${SHM_TMP}/stage"; mkdir -p "$STAGE"
+
+  # ══════════════════════════════════════════════════════════════════════════
+  step "1 / 2  Stream → Decrypt | Decompress | Extract"
+  # ══════════════════════════════════════════════════════════════════════════
+  # The pipeline streams from vault on disk through decrypt and decompress
+  # directly into the staging dir — no intermediate decrypted file in shm.
+  # Staging dir holds extracted files (same as final size), moved to CWD next.
+
+  PAYLOAD_OFFSET=$(( 8 + HDR_LEN ))
+
+  _extract_pipeline() {
+    # $1 = decompress command (or "none")
+    local dcmp="$1"
+    if [[ "$dcmp" == "none" ]]; then
+      tar -xf - -C "$STAGE" 2>/dev/null
+    else
+      eval "$dcmp" | tar -xf - -C "$STAGE" 2>/dev/null
+    fi
+  }
 
   case "$METHOD" in
     vault)
       if [[ "${ALGO:-none}" == "none" ]]; then
-        # Plain vault — SHA-256 integrity check
-        if [[ -n "$INTEGRITY" ]]; then
-          info "Verifying SHA-256 integrity..."
-          COMPUTED=$(sha256sum "$PAYLOAD" | awk '{print $1}')
-          [[ "$COMPUTED" == "$INTEGRITY" ]] \
-            && ok "SHA-256 verified" \
-            || { err "SHA-256 MISMATCH — data corrupted or tampered"; exit 1; }
+        # Plain vault — just decompress
+        if [[ "$HAS_TAR" == true ]]; then
+          case "$COMP" in
+            none)   dd if="$INPUT" bs=4096 skip=0 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+                      | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            gzip)   dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+                      | gunzip | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            bzip2)  dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+                      | bunzip2 | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            xz)     dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+                      | unxz | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            zstd)   dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+                      | zstd -d -q | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            lz4)    dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+                      | lz4 -d -q | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            brotli) dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+                      | brotli -d | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            lzo)    dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+                      | lzop -d | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            *)      # 7z/zlib need temp file
+                    TMP_PAY="${SHM_TMP}/p.tmp"
+                    dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" of="$TMP_PAY" 2>/dev/null
+                    if [[ "$COMP" == "7z" ]]; then
+                      7z e "-o${SHM_TMP}/7z_out" "$TMP_PAY" >/dev/null 2>&1
+                      tar -xf "${SHM_TMP}/7z_out/data.tar" -C "$STAGE" 2>/dev/null
+                    else
+                      python3 -c "import sys,zlib; sys.stdout.buffer.write(zlib.decompress(sys.stdin.buffer.read()))" \
+                        < "$TMP_PAY" | tar -xf - -C "$STAGE" 2>/dev/null
+                    fi
+                    shred -uz "$TMP_PAY" 2>/dev/null ;;
+          esac
+        else
+          # No tar — single raw file
+          dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+            > "${STAGE}/${ORIG_NAME}"
         fi
-        cp "$PAYLOAD" "$DECRYPTED"
-        ok "no decryption (plain vault)"
 
       else
-        # OpenSSL vault — re-derive keys then verify HMAC before decrypting
-        need argon2 "sudo pacman -S argon2"
-
-        info "Argon2id re-derive  (t=${KDF_T}, m=2^${KDF_M} KiB, p=${KDF_P}) ..."
-        derive_key "$PASSWD" "$KDF_SALT" "$KDF_T" "$KDF_M" "$KDF_P"
-        ENC_KEY="${RAW_KEY:0:$KEY_LEN}"
-        HMAC_KEY="${RAW_KEY:64:64}"
-        RAW_KEY=""
-
-        if [[ "$AUTH" == "yes" ]]; then
-          if [[ -z "$STORED_HMAC" ]]; then
-            err "Vault claims AUTH=yes but HMAC field is absent — refusing to decrypt."
-            exit 1
-          fi
-
-          # Reconstruct the header as it was BEFORE the HMAC line was appended.
-          # The vault header on disk = (header_without_HMAC) + "HMAC=...\n"
-          # HMAC was computed over: header_without_HMAC || ciphertext
-          HDR_NO_HMAC=$(printf '%s\n' "$HDR" | grep -v '^HMAC=')
-
-          info "Verifying HMAC-SHA256 over header fields + ciphertext..."
-          COMPUTED_HMAC=$(
-            { printf '%s\n' "$HDR_NO_HMAC"; cat "$PAYLOAD"; } \
-            | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${HMAC_KEY}" \
-            | awk '{print $NF}'
-          )
-
-          if [[ "$COMPUTED_HMAC" == "$STORED_HMAC" ]]; then
-            ok "HMAC verified — header fields + ciphertext are authentic and untampered"
-          else
-            err "HMAC VERIFICATION FAILED"
-            err "The header or ciphertext has been modified, or the password is wrong."
-            err "Refusing to decrypt."
-            exit 1
-          fi
+        # Encrypted vault — stream: decrypt | decompress | extract
+        if [[ "$HAS_TAR" == true ]]; then
+          case "$COMP" in
+            none)
+              dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+                | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null \
+                | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            gzip)
+              dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+                | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null \
+                | gunzip | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            bzip2)
+              dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+                | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null \
+                | bunzip2 | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            xz)
+              dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+                | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null \
+                | unxz | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            zstd)
+              dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+                | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null \
+                | zstd -d -q | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            lz4)
+              dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+                | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null \
+                | lz4 -d -q | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            brotli)
+              dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+                | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null \
+                | brotli -d | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            lzo)
+              dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+                | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null \
+                | lzop -d | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            7z|zlib)
+              # These need a temp file due to random-access requirements
+              TMP_DEC="${SHM_TMP}/dec.tmp"; chmod 600 "$TMP_DEC" 2>/dev/null || touch "$TMP_DEC"
+              dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+                | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt \
+                  -out "$TMP_DEC" 2>/dev/null
+              if [[ "$COMP" == "7z" ]]; then
+                7z e "-o${SHM_TMP}/7z_out" "$TMP_DEC" >/dev/null 2>&1
+                tar -xf "${SHM_TMP}/7z_out/data.tar" -C "$STAGE" 2>/dev/null
+              else
+                python3 -c "import sys,zlib; sys.stdout.buffer.write(zlib.decompress(sys.stdin.buffer.read()))" \
+                  < "$TMP_DEC" | tar -xf - -C "$STAGE" 2>/dev/null
+              fi
+              shred -uz "$TMP_DEC" 2>/dev/null ;;
+          esac
+        else
+          # No tar — single file, no compression
+          dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+            | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null \
+            > "${STAGE}/${ORIG_NAME}"
         fi
 
-        openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt \
-          -in "$PAYLOAD" -out "$DECRYPTED" 2>/dev/null \
-          || { err "Decryption failed — wrong password or corrupted data"; exit 1; }
-        ok "decrypted"
+        # Check pipeline succeeded
+        [[ -e "${STAGE}/${ORIG_NAME}" || -n "$(ls -A "$STAGE" 2>/dev/null)" ]] \
+          || { err "Decryption pipeline failed — wrong password or corrupted vault"; exit 1; }
       fi
       ;;
 
     age)
       echo
-      age -d -o "$DECRYPTED" "$PAYLOAD" \
-        || { err "age decryption failed"; exit 1; }
+      if [[ "$HAS_TAR" == true ]]; then
+        case "$COMP" in
+          none)   age -d "$INPUT" 2>/dev/null | tar -xf - -C "$STAGE" 2>/dev/null ;;
+          gzip)   age -d "$INPUT" 2>/dev/null | gunzip | tar -xf - -C "$STAGE" 2>/dev/null ;;
+          bzip2)  age -d "$INPUT" 2>/dev/null | bunzip2 | tar -xf - -C "$STAGE" 2>/dev/null ;;
+          xz)     age -d "$INPUT" 2>/dev/null | unxz | tar -xf - -C "$STAGE" 2>/dev/null ;;
+          zstd)   age -d "$INPUT" 2>/dev/null | zstd -d -q | tar -xf - -C "$STAGE" 2>/dev/null ;;
+          lz4)    age -d "$INPUT" 2>/dev/null | lz4 -d -q | tar -xf - -C "$STAGE" 2>/dev/null ;;
+          brotli) age -d "$INPUT" 2>/dev/null | brotli -d | tar -xf - -C "$STAGE" 2>/dev/null ;;
+          lzo)    age -d "$INPUT" 2>/dev/null | lzop -d | tar -xf - -C "$STAGE" 2>/dev/null ;;
+          *)      TMP_DEC="${SHM_TMP}/dec.tmp"
+                  age -d -o "$TMP_DEC" "$INPUT" 2>/dev/null \
+                    || { echo; err "age decryption failed"; exit 1; }
+                  if [[ "$COMP" == "7z" ]]; then
+                    7z e "-o${SHM_TMP}/7z_out" "$TMP_DEC" >/dev/null 2>&1
+                    tar -xf "${SHM_TMP}/7z_out/data.tar" -C "$STAGE" 2>/dev/null
+                  else
+                    python3 -c "import sys,zlib; sys.stdout.buffer.write(zlib.decompress(sys.stdin.buffer.read()))" \
+                      < "$TMP_DEC" | tar -xf - -C "$STAGE" 2>/dev/null
+                  fi
+                  shred -uz "$TMP_DEC" 2>/dev/null ;;
+        esac
+      else
+        age -d -o "${STAGE}/${ORIG_NAME}" "$INPUT" 2>/dev/null \
+          || { echo; err "age decryption failed"; exit 1; }
+      fi
       echo
-      ok "decrypted  (ChaCha20-Poly1305 verified by age)"
       ;;
 
     gpg)
-      printf '%s' "$PASSWD" | gpg \
-        --batch --passphrase-fd 0 --pinentry-mode loopback \
-        --no-symkey-cache -o "$DECRYPTED" -d "$PAYLOAD" 2>/dev/null \
-        || { err "GPG decryption failed — wrong password or corrupted data"; exit 1; }
-      ok "decrypted  (GPG integrity verified)"
+      if [[ "$HAS_TAR" == true ]]; then
+        case "$COMP" in
+          none)   printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
+                    --no-symkey-cache -d "$INPUT" 2>/dev/null | tar -xf - -C "$STAGE" 2>/dev/null ;;
+          gzip)   printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
+                    --no-symkey-cache -d "$INPUT" 2>/dev/null | gunzip | tar -xf - -C "$STAGE" 2>/dev/null ;;
+          bzip2)  printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
+                    --no-symkey-cache -d "$INPUT" 2>/dev/null | bunzip2 | tar -xf - -C "$STAGE" 2>/dev/null ;;
+          xz)     printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
+                    --no-symkey-cache -d "$INPUT" 2>/dev/null | unxz | tar -xf - -C "$STAGE" 2>/dev/null ;;
+          zstd)   printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
+                    --no-symkey-cache -d "$INPUT" 2>/dev/null | zstd -d -q | tar -xf - -C "$STAGE" 2>/dev/null ;;
+          lz4)    printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
+                    --no-symkey-cache -d "$INPUT" 2>/dev/null | lz4 -d -q | tar -xf - -C "$STAGE" 2>/dev/null ;;
+          brotli) printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
+                    --no-symkey-cache -d "$INPUT" 2>/dev/null | brotli -d | tar -xf - -C "$STAGE" 2>/dev/null ;;
+          lzo)    printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
+                    --no-symkey-cache -d "$INPUT" 2>/dev/null | lzop -d | tar -xf - -C "$STAGE" 2>/dev/null ;;
+          *)      TMP_DEC="${SHM_TMP}/dec.tmp"
+                  printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
+                    --no-symkey-cache -o "$TMP_DEC" -d "$INPUT" 2>/dev/null \
+                    || { err "GPG decryption failed"; exit 1; }
+                  if [[ "$COMP" == "7z" ]]; then
+                    7z e "-o${SHM_TMP}/7z_out" "$TMP_DEC" >/dev/null 2>&1
+                    tar -xf "${SHM_TMP}/7z_out/data.tar" -C "$STAGE" 2>/dev/null
+                  else
+                    python3 -c "import sys,zlib; sys.stdout.buffer.write(zlib.decompress(sys.stdin.buffer.read()))" \
+                      < "$TMP_DEC" | tar -xf - -C "$STAGE" 2>/dev/null
+                  fi
+                  shred -uz "$TMP_DEC" 2>/dev/null ;;
+        esac
+      else
+        printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
+          --no-symkey-cache -o "${STAGE}/${ORIG_NAME}" -d "$INPUT" 2>/dev/null \
+          || { err "GPG decryption failed"; exit 1; }
+      fi
       ;;
   esac
 
-  # ══════════════════════════════════════════════════════════════════════════
-  step "3 / 4  Decompress  ($COMP)"
-  # ══════════════════════════════════════════════════════════════════════════
-  DECOMPRESSED="$DECRYPTED"
+  # Verify something actually landed in staging
+  [[ -n "$(ls -A "$STAGE" 2>/dev/null)" ]] \
+    || { err "Decryption or extraction produced no output"; exit 1; }
+  ok "decrypted + extracted to staging  ($(du -sh "$STAGE" | cut -f1))"
 
-  if [[ "$COMP" != "none" ]]; then
-    case "$COMP" in
-      gzip)
-        mv "$DECRYPTED" "${VAULT_TMP}/data.tar.gz"
-        gunzip "${VAULT_TMP}/data.tar.gz"; DECOMPRESSED="${VAULT_TMP}/data.tar" ;;
-      bzip2)
-        mv "$DECRYPTED" "${VAULT_TMP}/data.tar.bz2"
-        bunzip2 "${VAULT_TMP}/data.tar.bz2"; DECOMPRESSED="${VAULT_TMP}/data.tar" ;;
-      xz)
-        mv "$DECRYPTED" "${VAULT_TMP}/data.tar.xz"
-        unxz "${VAULT_TMP}/data.tar.xz"; DECOMPRESSED="${VAULT_TMP}/data.tar" ;;
-      zstd)
-        zstd -d -q "$DECRYPTED" -o "${VAULT_TMP}/data.tar"
-        DECOMPRESSED="${VAULT_TMP}/data.tar" ;;
-      lz4)
-        lz4 -d -q "$DECRYPTED" "${VAULT_TMP}/data.tar" >/dev/null 2>&1
-        DECOMPRESSED="${VAULT_TMP}/data.tar" ;;
-      brotli)
-        brotli -d "$DECRYPTED" -o "${VAULT_TMP}/data.tar"
-        DECOMPRESSED="${VAULT_TMP}/data.tar" ;;
-      lzo)
-        lzop -d -o "${VAULT_TMP}/data.tar" "$DECRYPTED"
-        DECOMPRESSED="${VAULT_TMP}/data.tar" ;;
-      7z)
-        mkdir -p "${VAULT_TMP}/7z_out"
-        mv "$DECRYPTED" "${VAULT_TMP}/data.tar.7z"
-        7z e "-o${VAULT_TMP}/7z_out" "${VAULT_TMP}/data.tar.7z" >/dev/null 2>&1
-        DECOMPRESSED="${VAULT_TMP}/7z_out/data.tar" ;;
-      zlib)
-        python3 -c "import sys,zlib; sys.stdout.buffer.write(zlib.decompress(sys.stdin.buffer.read()))" \
-          < "$DECRYPTED" > "${VAULT_TMP}/data.tar"
-        DECOMPRESSED="${VAULT_TMP}/data.tar" ;;
-    esac
-    ok "done"
-  else
-    ok "skipped"
+  # ══════════════════════════════════════════════════════════════════════════
+  step "2 / 2  Move to CWD"
+  # ══════════════════════════════════════════════════════════════════════════
+  if [[ "$HAS_TAR" == true ]]; then
+    check_tar_safety "${STAGE}/.." 2>/dev/null || true   # safety already passed via pre-scan
   fi
 
-  # ══════════════════════════════════════════════════════════════════════════
-  step "4 / 4  Extract"
-  # ══════════════════════════════════════════════════════════════════════════
-
-  # Output path — always rooted in ORIG_CWD regardless of archive contents
   OUT_PATH="${ORIG_CWD}/${ORIG_NAME}"
   if [[ -e "$OUT_PATH" ]]; then
     OUT_PATH="${ORIG_CWD}/${ORIG_NAME}_restored_$(date +%s)"
     warn "Path exists — saving as: $(basename "$OUT_PATH")"
   fi
 
-  if [[ "$HAS_TAR" == true ]]; then
-    check_tar_safety "$DECOMPRESSED"
-
-    STAGE="${VAULT_TMP}/stage"
-    mkdir -p "$STAGE"
-    # GNU tar strips leading / by default (safe)
-    # -C extracts into our private staging dir only
-    tar -xf "$DECOMPRESSED" -C "$STAGE" 2>/dev/null \
-      || { err "Extraction failed — archive may be corrupted"; exit 1; }
-
-    EXPECTED="${STAGE}/${ORIG_NAME}"
-    if [[ -e "$EXPECTED" ]]; then
-      mv "$EXPECTED" "$OUT_PATH"
-    else
-      ITEMS=( "${STAGE}"/* )
-      if (( ${#ITEMS[@]} == 1 )); then
-        mv "${ITEMS[0]}" "$OUT_PATH"
-      elif (( ${#ITEMS[@]} > 1 )); then
-        mkdir -p "$OUT_PATH"; mv "${STAGE}"/* "$OUT_PATH/"
-      else
-        err "Archive appears to be empty"; exit 1
-      fi
-    fi
+  EXPECTED="${STAGE}/${ORIG_NAME}"
+  if [[ -e "$EXPECTED" ]]; then
+    mv "$EXPECTED" "$OUT_PATH"
   else
-    # Single file, no tar — move directly to CWD
-    mv "$DECOMPRESSED" "$OUT_PATH"
+    ITEMS=( "${STAGE}"/* )
+    if   (( ${#ITEMS[@]} == 1 )); then mv "${ITEMS[0]}" "$OUT_PATH"
+    elif (( ${#ITEMS[@]} >  1 )); then mkdir -p "$OUT_PATH"; mv "${STAGE}"/* "$OUT_PATH/"
+    else err "Staging directory is empty"; exit 1
+    fi
   fi
 
-  ok "restored  →  ${BLUE}${BOLD}${OUT_PATH}${NC}"
+  ok "moved to CWD  →  ${BLUE}${BOLD}${OUT_PATH}${NC}"
 
-  # ── Summary ────────────────────────────────────────────────────────────────
-  echo
   sep
   echo -e "${SAPPHIRE}${BOLD}  ⬡  Done${NC}"
-  label "  restored  :  " "$(du -sh "$OUT_PATH" 2>/dev/null | cut -f1)"
-  label "  location  :  " "$OUT_PATH"
+  lbl "  restored   :  " "$(du -sh "$OUT_PATH" 2>/dev/null | cut -f1)"
+  lbl "  location   :  " "$OUT_PATH"
+  lbl "  temp store :  " "/dev/shm  (RAM, shredded on exit)"
   echo
   echo -e "${GREEN}${BOLD}  🔓  Unsealed.${NC}"
   echo

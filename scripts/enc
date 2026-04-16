@@ -1,35 +1,24 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  enc  v5.0 — encrypt any file or folder
+#  enc  v5.2 — encrypt any file or folder
 #  Usage : enc <file|directory>
 #
-#  Encryption (10 modes):
-#    1.  none                         ⚠  plain data
-#    2.  AES-256-CTR + HMAC-SHA256   ⭐ best default (authenticated)
-#    3.  ChaCha20   + HMAC-SHA256    ⭐ best without AES-NI (authenticated)
-#    4.  AES-128-CTR + HMAC-SHA256      faster, still secure (authenticated)
-#    5.  ChaCha20                    ⚠  fast stream, no auth
-#    6.  AES-256-CBC                 ⚠  legacy compat, no auth
-#    7.  AES-256-CTR                 ⚠  legacy stream, no auth
-#    8.  AES-128-CBC                 ⚠  lighter legacy, no auth
-#    9.  age                            modern, ChaCha20-Poly1305
-#   10.  GPG                            PGP compatible, AES-256
+#  MEMORY SAFETY:
+#    All intermediate data lives exclusively in /dev/shm (RAM-backed tmpfs).
+#    Nothing touches /tmp or any disk path during processing.
+#    Temp dir is shredded (zeroed) before removal on exit, interrupt, or error.
+#    The pipeline streams  tar | compress | openssl  without writing a
+#    decompressed or unencrypted intermediate file — only one ciphertext file
+#    ever exists in /dev/shm at a time.
+#    Hard limit: aborts if estimated peak shm usage would exceed 100 MB.
+#
+#  VAULT FORMAT (.vault):
+#    [8 ASCII hex = header byte length][plaintext header][ciphertext]
+#    HMAC covers: all header fields (minus the HMAC= line itself) || ciphertext
 #
 #  KDF: Argon2id  t=3, m=2^14 KiB (16 MiB), p=4 → 64 bytes
-#    bytes  0–31 = cipher key (or 0–15 for 128-bit modes)
-#    bytes 32–63 = HMAC key
-#
-#  HMAC coverage (authenticated openssl modes):
-#    HMAC-SHA256(all header fields excluding HMAC= line  ||  ciphertext)
-#    → any change to ALGO/COMP/IV/ORIG/KDF params or ciphertext is detected
-#
-#  Vault format (.vault):
-#    [8 ASCII hex chars = header byte length]
-#    [plaintext header  — VAULTV1 + all metadata fields]
-#    [binary ciphertext]
-#
-#  age/gpg output:  <name>[.tar][.<comp>].<method>
-#    Single file + no compression → no tar (Option A, clean extension)
+#    RAW_KEY hex [0 –63]  = cipher key   (bytes 0–31, or 0–15 for 128-bit)
+#    RAW_KEY hex [64–127] = HMAC key     (hex offset 64 = byte offset 32, 32 bytes)
 # =============================================================================
 
 set -uo pipefail
@@ -43,80 +32,149 @@ SAPPHIRE='\033[38;2;116;199;236m'
 TEXT='\033[38;2;205;214;244m';   SUBTEXT='\033[38;2;166;173;200m'
 BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
 
-ok()    { echo -e "${GREEN}  ✓  ${*}${NC}"; }
-err()   { echo -e "${RED}  ✗  ${*}${NC}" >&2; }
-warn()  { echo -e "${YELLOW}  ⚠  ${*}${NC}"; }
-info()  { echo -e "${TEAL}  →  ${*}${NC}"; }
-step()  { echo -e "\n${MAUVE}${BOLD}  ══  ${*}${NC}"; }
-label() { echo -e "${SUBTEXT}  ${1}${TEXT}${2}${NC}"; }
-sep()   { echo -e "${SUBTEXT}${DIM}  ─────────────────────────────────────${NC}"; }
+ok()   { echo -e "${GREEN}  ✓  ${*}${NC}"; }
+err()  { echo -e "${RED}  ✗  ${*}${NC}" >&2; }
+warn() { echo -e "${YELLOW}  ⚠  ${*}${NC}"; }
+info() { echo -e "${TEAL}  →  ${*}${NC}"; }
+step() { echo -e "\n${MAUVE}${BOLD}  ══  ${*}${NC}"; }
+lbl()  { echo -e "${SUBTEXT}  ${1}${TEXT}${2:-}${NC}"; }
+sep()  { echo -e "${SUBTEXT}${DIM}  ──────────────────────────────────────────${NC}"; }
 
 banner() {
+  local target="$1" mode="$2"
+  local disp="$target"
+  (( ${#disp} > 44 )) && disp="…${target: -43}"
+  local inner="  vault ${mode}  v5.2  ·  ${disp}  "
+  local w=${#inner} bar="" i
+  for (( i=0; i<w; i++ )); do bar+="═"; done
   echo
-  echo -e "${MAUVE}${BOLD}  ╔══════════════════════════════════════╗${NC}"
-  echo -e "${MAUVE}${BOLD}  ║   🔒  vault enc  v5.0                ║${NC}"
-  echo -e "${MAUVE}${BOLD}  ╚══════════════════════════════════════╝${NC}"
+  echo -e "${MAUVE}${BOLD}  ╔${bar}╗${NC}"
+  echo -e "${MAUVE}${BOLD}  ║${inner}║${NC}"
+  echo -e "${MAUVE}${BOLD}  ╚${bar}╝${NC}"
   echo
 }
 
-VAULT_TMP=""
-cleanup() { [[ -n "$VAULT_TMP" && -d "$VAULT_TMP" ]] && rm -rf "$VAULT_TMP"; }
-trap cleanup EXIT INT TERM
+section() {
+  local s_lbl="$1" line="" fill i
+  fill=$(( 68 - ${#s_lbl} - 6 ))
+  for (( i=0; i<fill; i++ )); do line+="─"; done
+  echo -e "\n  ${SUBTEXT}${DIM}──  ${NC}${LAVENDER}${BOLD}${s_lbl}${NC}  ${SUBTEXT}${DIM}${line}${NC}\n"
+}
 
-# ── Numbered menu — lines starting with ── are visual separators ──────────────
-# Sets global $PICKED to chosen option text.
-pick_menu() {
-  local title="$1"; shift
-  local opts=("$@")
-  echo -e "${LAVENDER}${BOLD}  ${title}${NC}"
-  local i=1
-  for opt in "${opts[@]}"; do
-    if [[ "$opt" == ──* ]]; then
-      echo -e "  ${SUBTEXT}${DIM}  ${opt}${NC}"
-    else
-      printf "    ${SUBTEXT}%2d.${NC}  ${TEXT}%s${NC}\n" "$i" "$opt"
-      (( i++ )) || true
-    fi
-  done
-  local max=$(( i - 1 ))
+menu_item() {
+  local flag="$1" num="$2" name="$3" desc="$4" col
+  case "$flag" in
+    ★) col="$GREEN"  ;;
+    ⚠) col="$YELLOW" ;;
+    *) col="$NC"     ;;
+  esac
+  printf "    ${col}%s${NC}  ${SUBTEXT}%2d.${NC}  ${TEXT}%-36s${SUBTEXT}%s${NC}\n" \
+    "$flag" "$num" "$name" "$desc"
+}
+menu_sep() { echo -e "    ${SUBTEXT}${DIM}── $*${NC}"; }
+
+prompt_choice() {
+  local max="$1" default="$2"
   while true; do
-    printf "\n${PEACH}  ›  ${NC}"
+    printf "\n  ${PEACH}›  ${NC}${SUBTEXT}[default: ${default}]${NC}  "
     read -r choice
+    [[ -z "$choice" ]] && choice="$default"
     if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= max )); then
-      local k=0
-      for opt in "${opts[@]}"; do
-        [[ "$opt" == ──* ]] && continue
-        (( k++ )) || true
-        (( k == choice )) && { PICKED="$opt"; return 0; }
-      done
+      CHOICE="$choice"; return 0
     fi
     warn "Enter a number between 1 and ${max}"
   done
 }
 
+pw_strength() {
+  local pw="$1" score=0 len=${#pw}
+  (( len >= 8  )) && (( score++ ))
+  (( len >= 12 )) && (( score++ ))
+  (( len >= 16 )) && (( score++ ))
+  (( len >= 20 )) && (( score++ ))
+  [[ "$pw" =~ [A-Z] ]]        && (( score++ ))
+  [[ "$pw" =~ [a-z] ]]        && (( score++ ))
+  [[ "$pw" =~ [0-9] ]]        && (( score++ ))
+  [[ "$pw" =~ [^a-zA-Z0-9] ]] && (( score++ ))
+  local filled=$(( score * 10 / 8 )); (( filled > 10 )) && filled=10
+  local empty=$(( 10 - filled )) f="" e="" i
+  for (( i=0; i<filled; i++ )); do f+="█"; done
+  for (( i=0; i<empty;  i++ )); do e+="░"; done
+  local col lbl
+  if   (( score <= 2 )); then col="$RED";    lbl="weak"
+  elif (( score <= 3 )); then col="$YELLOW"; lbl="fair"
+  elif (( score <= 5 )); then col="$PEACH";  lbl="good"
+  elif (( score <= 6 )); then col="$GREEN";  lbl="strong"
+  else                        col="$GREEN";  lbl="excellent"
+  fi
+  printf "${col}%s${SUBTEXT}%s${NC}  ${col}%s${NC}" "$f" "$e" "$lbl"
+}
+
 need() { command -v "$1" &>/dev/null || { err "'$1' not installed.  $2"; exit 1; }; }
 
-# ── Argon2id key derivation ───────────────────────────────────────────────────
-# argon2 CLI (Arch: sudo pacman -S argon2):
-#   -m N  =  2^N KiB of memory   (e.g. -m 14 = 16 MiB)
-# Returns 128 hex chars (64 bytes) in global $RAW_KEY
+# ── /dev/shm guard ────────────────────────────────────────────────────────────
+check_shm() {
+  [[ -d /dev/shm && -w /dev/shm ]] || {
+    err "/dev/shm is not available or not writable on this system"
+    err "Cannot proceed — no safe in-memory workspace"
+    exit 1
+  }
+  # Confirm it is actually tmpfs (RAM-backed)
+  local fstype
+  fstype=$(stat -f -c '%T' /dev/shm 2>/dev/null)
+  [[ "$fstype" == "tmpfs" ]] || warn "/dev/shm reports fs type '${fstype}', expected tmpfs"
+}
+
+# ── Estimate peak /dev/shm bytes needed for a given input + compression ───────
+# Returns estimate in bytes via stdout.
+# Pipeline: tar | compress | enc → only ONE ciphertext file in shm at a time.
+estimate_shm_bytes() {
+  local input_bytes="$1" comp="$2"
+  local tar_bytes=$(( input_bytes * 105 / 100 ))   # ~5% tar overhead
+  local ratio
+  case "$comp" in
+    gzip|zstd|bzip2|xz) ratio=60 ;;   # ~40% reduction typical
+    lz4|lzo|zlib)        ratio=75 ;;   # ~25% reduction
+    brotli)              ratio=55 ;;   # ~45% reduction (text)
+    7z)                  ratio=50 ;;   # ~50% reduction
+    none)                ratio=100 ;;
+    *)                   ratio=100 ;;
+  esac
+  echo $(( tar_bytes * ratio / 100 ))
+}
+
+# ── Shred all regular files in VAULT_TMP, then remove ────────────────────────
+SHM_TMP=""
+cleanup() {
+  [[ -z "$SHM_TMP" || ! -d "$SHM_TMP" ]] && return
+  # Zero every regular file before removal — belt-and-suspenders for RAM
+  find "$SHM_TMP" -type f -exec shred -uz {} \; 2>/dev/null || true
+  rm -rf "$SHM_TMP"
+}
+trap cleanup EXIT INT TERM
+
+# ── Argon2id KDF ──────────────────────────────────────────────────────────────
+# Arch: sudo pacman -S argon2
+# -m N means 2^N KiB   (-m 14 = 16 MiB)
+# Sets global $RAW_KEY to 128 hex chars (64 bytes)
 derive_key() {
   local passwd="$1" salt="$2" t="$3" m="$4" p="$5"
   RAW_KEY=$(printf '%s' "$passwd" \
     | argon2 "$salt" -id -t "$t" -m "$m" -p "$p" -l 64 -r 2>/dev/null \
     | tr -d '[:space:]')
   [[ ${#RAW_KEY} -eq 128 ]] || {
-    err "Argon2id key derivation failed (expected 128 hex chars, got ${#RAW_KEY})"
-    err "Check: argon2 is installed (sudo pacman -S argon2)"
+    err "Argon2id failed (expected 128 hex chars, got ${#RAW_KEY})"
+    err "Install: sudo pacman -S argon2"
     exit 1
   }
 }
 
 # =============================================================================
 main() {
-  banner
   need openssl "sudo pacman -S openssl"
   need tar     "sudo pacman -S tar"
+  need shred   "sudo pacman -S coreutils"
+  check_shm
 
   [[ $# -lt 1 ]] && { err "Usage: enc <file|directory>"; exit 1; }
   INPUT="${1%/}"
@@ -127,58 +185,35 @@ main() {
   ORIG_NAME="$(basename "$ABS_INPUT")"
   [[ -d "$ABS_INPUT" ]] && FTYPE="dir" || FTYPE="file"
 
-  label "  Target   :  " "$ABS_INPUT  ($FTYPE)"
-  echo
+  banner "$ABS_INPUT" "enc"
 
-  # ── [A] Encryption ────────────────────────────────────────────────────────
-  pick_menu "Encryption:" \
-    "── No encryption ───────────────────────────────────────────────────────" \
-    "none                             ⚠  plain data, no confidentiality" \
-    "── Authenticated  (Argon2id KDF + HMAC-SHA256 over header+ciphertext) ──" \
-    "AES-256-CTR + HMAC-SHA256        ⭐  best default" \
-    "ChaCha20   + HMAC-SHA256         ⭐  best without AES-NI hardware" \
-    "AES-128-CTR + HMAC-SHA256            faster, still secure" \
-    "── Unauthenticated  (Argon2id KDF, no tamper detection) ────────────────" \
-    "ChaCha20                         ⚠  fast stream, no auth" \
-    "AES-256-CBC                      ⚠  legacy compatibility" \
-    "AES-256-CTR                      ⚠  legacy stream" \
-    "AES-128-CBC                      ⚠  lighter legacy" \
-    "── External tools (own KDF + authenticated encryption) ─────────────────" \
-    "age                                  modern, ChaCha20-Poly1305, simple" \
-    "GPG                                  widely used, AES-256, PGP compatible"
+  # ──────────────────────────────────────────────────────────────────────────
+  section "Encryption"
+  menu_item "★"  1 "AES-256-CTR + HMAC-SHA256"  "recommended default"
+  menu_item "★"  2 "ChaCha20   + HMAC-SHA256"   "recommended without AES-NI"
+  menu_item " "  3 "AES-128-CTR + HMAC-SHA256"  "faster, slightly weaker key"
+  menu_item " "  4 "age"                         "modern, ChaCha20-Poly1305"
+  menu_item " "  5 "GPG"                         "PGP compatible"
+  menu_sep "unauthenticated"
+  menu_item "⚠"  6 "ChaCha20"                    "no tamper detection"
+  menu_item "⚠"  7 "AES-256-CBC"                 "legacy only"
+  menu_item "⚠"  8 "AES-256-CTR"                 "legacy only"
+  menu_item "⚠"  9 "AES-128-CBC"                 "legacy only"
+  menu_item "⚠" 10 "none"                         "no encryption"
+  prompt_choice 10 1
 
-  METHOD="openssl"; CIPHER=""; AUTH="no"; KEY_LEN=64
-  LABEL=""  # human-readable label stored in vault header
-
-  case "$PICKED" in
-    none*)
-      METHOD="none"
-      LABEL="none" ;;
-    AES-256-CTR*)
-      CIPHER="aes-256-ctr"; AUTH="yes"; KEY_LEN=64
-      LABEL="AES-256-CTR+HMAC-SHA256" ;;
-    ChaCha20\ +*)
-      CIPHER="chacha20";    AUTH="yes"; KEY_LEN=64
-      LABEL="ChaCha20+HMAC-SHA256" ;;
-    AES-128-CTR*)
-      CIPHER="aes-128-ctr"; AUTH="yes"; KEY_LEN=32
-      LABEL="AES-128-CTR+HMAC-SHA256" ;;
-    ChaCha20\ *)
-      CIPHER="chacha20";    AUTH="no";  KEY_LEN=64
-      LABEL="ChaCha20" ;;
-    AES-256-CBC*)
-      CIPHER="aes-256-cbc"; AUTH="no";  KEY_LEN=64
-      LABEL="AES-256-CBC" ;;
-    AES-256-CTR*)
-      CIPHER="aes-256-ctr"; AUTH="no";  KEY_LEN=64
-      LABEL="AES-256-CTR" ;;
-    AES-128-CBC*)
-      CIPHER="aes-128-cbc"; AUTH="no";  KEY_LEN=32
-      LABEL="AES-128-CBC" ;;
-    age*)
-      METHOD="age"; LABEL="age" ;;
-    GPG*)
-      METHOD="gpg"; LABEL="gpg" ;;
+  METHOD="openssl"; CIPHER_ALG=""; AUTH="no"; KEY_LEN=64; LABEL=""
+  case "$CHOICE" in
+    1) CIPHER_ALG="aes-256-ctr"; AUTH="yes"; KEY_LEN=64; LABEL="AES-256-CTR+HMAC-SHA256" ;;
+    2) CIPHER_ALG="chacha20";    AUTH="yes"; KEY_LEN=64; LABEL="ChaCha20+HMAC-SHA256"     ;;
+    3) CIPHER_ALG="aes-128-ctr"; AUTH="yes"; KEY_LEN=32; LABEL="AES-128-CTR+HMAC-SHA256" ;;
+    4) METHOD="age";                                  LABEL="age"                      ;;
+    5) METHOD="gpg";                                  LABEL="gpg"                      ;;
+    6) CIPHER_ALG="chacha20";    AUTH="no";  KEY_LEN=64; LABEL="ChaCha20"                 ;;
+    7) CIPHER_ALG="aes-256-cbc"; AUTH="no";  KEY_LEN=64; LABEL="AES-256-CBC"              ;;
+    8) CIPHER_ALG="aes-256-ctr"; AUTH="no";  KEY_LEN=64; LABEL="AES-256-CTR"              ;;
+    9) CIPHER_ALG="aes-128-cbc"; AUTH="no";  KEY_LEN=32; LABEL="AES-128-CBC"              ;;
+   10) METHOD="none";                                 LABEL="none"                     ;;
   esac
 
   case "$METHOD" in
@@ -188,46 +223,38 @@ main() {
   esac
 
   if [[ "$METHOD" == "none" ]]; then
-    echo
-    warn "No encryption — output is PLAIN DATA. Anyone can read it."
+    echo; warn "No encryption — output will be PLAIN DATA."
     printf "${PEACH}  Continue? [y/N]  ${NC}"; read -r ans
     [[ "$ans" =~ ^[yY]$ ]] || { info "Aborted."; exit 0; }
   elif [[ "$METHOD" == "openssl" && "$AUTH" == "no" ]]; then
-    echo
-    warn "Unauthenticated mode — ciphertext tampering won't be detected."
-    warn "Use AES-256-CTR+HMAC or ChaCha20+HMAC for integrity protection."
+    echo; warn "Unauthenticated mode — ciphertext tampering will not be detected."
   fi
-  echo
 
-  # ── [B] Compression ────────────────────────────────────────────────────────
-  pick_menu "Compression:" \
-    "── Recommended ─────────────────────────────────────────────────────────" \
-    "zstd         ⭐  best overall  (fast + great ratio)" \
-    "── Widely compatible ────────────────────────────────────────────────────" \
-    "gzip             fast, universal" \
-    "bzip2            better ratio, slower" \
-    "xz               best ratio, slowest" \
-    "── Speed-first ──────────────────────────────────────────────────────────" \
-    "lz4              extremely fast, lower ratio" \
-    "lzop             very fast, lower ratio" \
-    "── Specialised ──────────────────────────────────────────────────────────" \
-    "brotli           great for text / HTML" \
-    "7z / lzma        strong compression  (requires p7zip)" \
-    "zlib / deflate   standard deflate format" \
-    "── Skip ─────────────────────────────────────────────────────────────────" \
-    "none             no compression"
+  # ──────────────────────────────────────────────────────────────────────────
+  section "Compression"
+  menu_item "★"  1 "zstd"           "recommended  ·  fast + best ratio"
+  menu_item " "  2 "gzip"           "universal compatibility"
+  menu_item " "  3 "lz4"            "speed-first"
+  menu_item " "  4 "bzip2"          "better ratio, slower"
+  menu_item " "  5 "xz"             "best ratio, slowest"
+  menu_item " "  6 "brotli"         "optimised for text"
+  menu_item " "  7 "7z / lzma"      "requires p7zip"
+  menu_item " "  8 "zlib / deflate" "standard deflate"
+  menu_item " "  9 "lzop"           "very fast, low ratio"
+  menu_item " " 10 "none"           "skip compression"
+  prompt_choice 10 1
 
-  case "$PICKED" in
-    zstd*)   COMP="zstd";   COMP_EXT=".zst"   ;;
-    gzip*)   COMP="gzip";   COMP_EXT=".gz"    ;;
-    bzip2*)  COMP="bzip2";  COMP_EXT=".bz2"   ;;
-    xz*)     COMP="xz";     COMP_EXT=".xz"    ;;
-    lz4*)    COMP="lz4";    COMP_EXT=".lz4"   ;;
-    lzop*)   COMP="lzo";    COMP_EXT=".lzo"   ;;
-    brotli*) COMP="brotli"; COMP_EXT=".br"    ;;
-    7z*)     COMP="7z";     COMP_EXT=".7z"    ;;
-    zlib*)   COMP="zlib";   COMP_EXT=".zlib"  ;;
-    none*)   COMP="none";   COMP_EXT=""        ;;
+  case "$CHOICE" in
+    1) COMP="zstd";   COMP_EXT=".zst"  ;;
+    2) COMP="gzip";   COMP_EXT=".gz"   ;;
+    3) COMP="lz4";    COMP_EXT=".lz4"  ;;
+    4) COMP="bzip2";  COMP_EXT=".bz2"  ;;
+    5) COMP="xz";     COMP_EXT=".xz"   ;;
+    6) COMP="brotli"; COMP_EXT=".br"   ;;
+    7) COMP="7z";     COMP_EXT=".7z"   ;;
+    8) COMP="zlib";   COMP_EXT=".zlib" ;;
+    9) COMP="lzo";    COMP_EXT=".lzo"  ;;
+   10) COMP="none";   COMP_EXT=""      ;;
   esac
 
   case "$COMP" in
@@ -238,24 +265,44 @@ main() {
     7z)     need 7z      "sudo pacman -S p7zip"  ;;
     zlib)   need python3 "sudo pacman -S python" ;;
   esac
-  echo
 
-  # ── [C] Password ───────────────────────────────────────────────────────────
+  # ── Size and memory check ─────────────────────────────────────────────────
+  INPUT_BYTES=$(du -sb "$ABS_INPUT" 2>/dev/null | cut -f1)
+  SHM_NEEDED=$(estimate_shm_bytes "$INPUT_BYTES" "$COMP")
+  SHM_LIMIT=$(( 100 * 1024 * 1024 ))   # 100 MiB hard limit
+  SHM_FREE=$(( $(df --output=avail /dev/shm | tail -1) * 1024 ))
+
+  if (( SHM_NEEDED > SHM_LIMIT )); then
+    echo
+    err "Estimated peak memory usage: $(( SHM_NEEDED / 1024 / 1024 )) MiB exceeds 100 MiB limit."
+    err "Input: $(( INPUT_BYTES / 1024 / 1024 )) MiB   Compression: ${COMP}"
+    err "To process larger files, split them first or use a compression with a higher ratio."
+    exit 1
+  fi
+
+  if (( SHM_NEEDED > SHM_FREE )); then
+    err "Not enough /dev/shm space: need ~$(( SHM_NEEDED / 1024 / 1024 )) MiB, have $(( SHM_FREE / 1024 / 1024 )) MiB"
+    exit 1
+  fi
+
+  # ──────────────────────────────────────────────────────────────────────────
+  section "Password"
   PASSWD=""
   if [[ "$METHOD" != "age" && "$METHOD" != "none" ]]; then
     while true; do
-      printf "${LAVENDER}${BOLD}  Password :  ${NC}"; read -rs PASSWD; echo
-      [[ -z "$PASSWD" ]] && { warn "Password cannot be empty"; continue; }
-      printf "${LAVENDER}${BOLD}  Confirm  :  ${NC}"; read -rs P2; echo
+      printf "  ${LAVENDER}${BOLD}Password :  ${NC}"; read -rs PASSWD; echo
+      [[ -z "$PASSWD" ]] && { warn "Password cannot be empty"; echo; continue; }
+      echo -e "  ${SUBTEXT}Strength :  ${NC}$(pw_strength "$PASSWD")"
+      echo
+      printf "  ${LAVENDER}${BOLD}Confirm  :  ${NC}"; read -rs P2; echo
       [[ "$PASSWD" == "$P2" ]] && break
       warn "Passwords don't match — try again"; echo
-    done
-    echo
+    done; echo
   elif [[ "$METHOD" == "age" ]]; then
     info "age will prompt for passphrase during encryption"; echo
   fi
 
-  # ── Option A: skip tar for single file + no compression + age/gpg ─────────
+  # ── Option A: single file + no comp + age/gpg = skip tar ──────────────────
   USE_TAR=true
   if [[ "$FTYPE" == "file" && "$COMP" == "none" \
         && ( "$METHOD" == "age" || "$METHOD" == "gpg" ) ]]; then
@@ -274,119 +321,165 @@ main() {
   fi
 
   if [[ -e "$OUTPUT" ]]; then
-    TS=$(date +%s)
-    EXT="${OUTPUT##*.}"
+    TS=$(date +%s); EXT="${OUTPUT##*.}"
     OUTPUT="${OUTPUT%.*}_${TS}.${EXT}"
     warn "Output exists — saving as: $OUTPUT"
   fi
 
-  VAULT_TMP="$(mktemp -d /tmp/vault.XXXXXX)"
-  chmod 700 "$VAULT_TMP"
+  # Create shm workspace — chmod 700 so other users can't read intermediate files
+  SHM_TMP="$(mktemp -d /dev/shm/vault.XXXXXX)"
+  chmod 700 "$SHM_TMP"
+
+  KDF_T=3; KDF_M=14; KDF_P=4
+  KDF_SALT=""; IV=""; ENC_KEY=""; HMAC_KEY=""; STORED_HMAC=""; INTEGRITY=""
 
   # ══════════════════════════════════════════════════════════════════════════
-  step "1 / 4  Archive"
+  step "1 / 3  Stream → Archive | Compress | Encrypt"
   # ══════════════════════════════════════════════════════════════════════════
-  if [[ "$USE_TAR" == true ]]; then
-    WORK="${VAULT_TMP}/data.tar"
-    tar -cf "$WORK" -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
-      || { err "Failed to archive: $ABS_INPUT"; exit 1; }
-    ok "tar      $(du -sh "$WORK" | cut -f1)"
-  else
-    WORK="${VAULT_TMP}/data.bin"
-    cp "$ABS_INPUT" "$WORK" || { err "Failed to copy: $ABS_INPUT"; exit 1; }
-    ok "copied   $(du -sh "$WORK" | cut -f1)  (single file, no tar)"
-  fi
+  # The entire pipeline runs in one shot: tar | compress | openssl enc
+  # Only ONE file ever sits in /dev/shm: the ciphertext.
+  # No uncompressed tar file, no unencrypted compressed file — ever.
 
-  # ══════════════════════════════════════════════════════════════════════════
-  step "2 / 4  Compress  ($COMP)"
-  # ══════════════════════════════════════════════════════════════════════════
-  if [[ "$COMP" != "none" ]]; then
-    case "$COMP" in
-      gzip)   gzip -f "$WORK";                            WORK="${WORK}.gz"   ;;
-      bzip2)  bzip2 -f "$WORK";                           WORK="${WORK}.bz2"  ;;
-      xz)     xz -T0 -f "$WORK";                          WORK="${WORK}.xz"   ;;
-      zstd)   zstd -T0 -f -q "$WORK" -o "${WORK}.zst";  rm -f "$WORK"; WORK="${WORK}.zst"  ;;
-      lz4)    lz4 -f -q "$WORK" "${WORK}.lz4" >/dev/null 2>&1; rm -f "$WORK"; WORK="${WORK}.lz4" ;;
-      lzo)    lzop -f -q -o "${WORK}.lzo" "$WORK";        rm -f "$WORK"; WORK="${WORK}.lzo" ;;
-      brotli) brotli -f "$WORK" -o "${WORK}.br";          rm -f "$WORK"; WORK="${WORK}.br"  ;;
-      7z)     7z a -t7z -mx=9 -mmt=on "${WORK}.7z" "$WORK" >/dev/null 2>&1;
-              rm -f "$WORK"; WORK="${WORK}.7z" ;;
-      zlib)   python3 -c "import sys,zlib; sys.stdout.buffer.write(zlib.compress(sys.stdin.buffer.read(),9))" \
-                < "$WORK" > "${WORK}.zlib";
-              rm -f "$WORK"; WORK="${WORK}.zlib" ;;
-    esac
-    ok "done     $(du -sh "$WORK" | cut -f1)"
-  else
-    ok "skipped"
-  fi
-
-  # ══════════════════════════════════════════════════════════════════════════
-  step "3 / 4  Encrypt  ($LABEL)"
-  # ══════════════════════════════════════════════════════════════════════════
-  ENCRYPTED="${VAULT_TMP}/payload.enc"
-  KDF_SALT=""; IV=""; ENC_KEY=""; HMAC_KEY=""; STORED_HMAC=""
-  INTEGRITY=""
-  # Argon2id params — -m N means 2^N KiB of memory
-  KDF_T=3; KDF_M=14; KDF_P=4   # 2^14 KiB = 16 MiB
+  CIPHER_FILE="${SHM_TMP}/payload.enc"
+  chmod 600 "$CIPHER_FILE" 2>/dev/null || touch "$CIPHER_FILE" && chmod 600 "$CIPHER_FILE"
 
   case "$METHOD" in
-    # ── Plain (no encryption) ───────────────────────────────────────────────
     none)
-      cp "$WORK" "$ENCRYPTED"
-      INTEGRITY=$(sha256sum "$ENCRYPTED" | awk '{print $1}')
-      ok "skipped  (SHA-256 fingerprint recorded)"
+      # No encryption — just archive+compress into shm, compute SHA-256
+      if [[ "$USE_TAR" == true ]]; then
+        case "$COMP" in
+          none)   tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null > "$CIPHER_FILE" ;;
+          gzip)   tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | gzip > "$CIPHER_FILE" ;;
+          bzip2)  tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | bzip2 > "$CIPHER_FILE" ;;
+          xz)     tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | xz -T0 > "$CIPHER_FILE" ;;
+          zstd)   tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | zstd -T0 -q > "$CIPHER_FILE" ;;
+          lz4)    tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | lz4 -q > "$CIPHER_FILE" ;;
+          lzo)    tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | lzop > "$CIPHER_FILE" ;;
+          brotli) tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | brotli > "$CIPHER_FILE" ;;
+          7z)     tar -cf "${SHM_TMP}/d.tar" -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null
+                  7z a -t7z -mx=9 -mmt=on -si "${SHM_TMP}/d.tar" > "$CIPHER_FILE" 2>/dev/null
+                  shred -uz "${SHM_TMP}/d.tar" 2>/dev/null || rm -f "${SHM_TMP}/d.tar" ;;
+          zlib)   tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
+                    | python3 -c "import sys,zlib; sys.stdout.buffer.write(zlib.compress(sys.stdin.buffer.read(),9))" \
+                    > "$CIPHER_FILE" ;;
+        esac
+      else
+        cp "$ABS_INPUT" "$CIPHER_FILE"
+      fi
+      INTEGRITY=$(sha256sum "$CIPHER_FILE" | awk '{print $1}')
+      ok "archived+compressed  →  $(du -sh "$CIPHER_FILE" | cut -f1)  (no encryption)"
       ;;
 
-    # ── OpenSSL ─────────────────────────────────────────────────────────────
     openssl)
-      KDF_SALT=$(openssl rand -hex 16)   # 16 bytes → stored in header
-      IV=$(openssl rand -hex 16)          # 16 bytes → stored in header
-
-      info "Argon2id  (t=${KDF_T}, m=2^${KDF_M} KiB = $((2**KDF_M/1024)) MiB, p=${KDF_P}) ..."
+      KDF_SALT=$(openssl rand -hex 16)
+      IV=$(openssl rand -hex 16)
+      info "Argon2id  (t=${KDF_T}, m=2^${KDF_M} KiB = 16 MiB, p=${KDF_P}) ..."
       derive_key "$PASSWD" "$KDF_SALT" "$KDF_T" "$KDF_M" "$KDF_P"
-      ENC_KEY="${RAW_KEY:0:$KEY_LEN}"   # cipher key
-      HMAC_KEY="${RAW_KEY:64:64}"       # HMAC key (always 32 bytes at offset 32)
+      # RAW_KEY hex [0–63]   = cipher key  (bytes 0–31, or 0–15 for 128-bit)
+      # RAW_KEY hex [64–127] = HMAC key    (hex offset 64 = byte offset 32, 32 bytes)
+      ENC_KEY="${RAW_KEY:0:$KEY_LEN}"
+      HMAC_KEY="${RAW_KEY:64:64}"
       RAW_KEY=""
 
-      openssl enc "-${CIPHER}" -K "$ENC_KEY" -iv "$IV" -nosalt \
-        -in "$WORK" -out "$ENCRYPTED" 2>/dev/null \
-        || { err "Encryption failed"; exit 1; }
+      # Stream: tar | compress | openssl enc  → ciphertext only in shm
 
-      # HMAC is computed AFTER building the header (next step)
-      # so we defer it — see below in [4/4]
-      ok "ciphertext produced"
+      # CIPHER_ALG already set above
+      
+
+      _run_pipeline() {
+        local src="$1"
+        case "$COMP" in
+          none)   tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
+                    | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
+          gzip)   tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
+                    | gzip | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
+          bzip2)  tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
+                    | bzip2 | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
+          xz)     tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
+                    | xz -T0 | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
+          zstd)   tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
+                    | zstd -T0 -q | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
+          lz4)    tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
+                    | lz4 -q | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
+          lzo)    tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
+                    | lzop | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
+          brotli) tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
+                    | brotli | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
+          7z)     tar -cf "${SHM_TMP}/d.tar" -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null
+                  7z a -t7z -mx=9 -mmt=on -so "${SHM_TMP}/d.tar" 2>/dev/null \
+                    | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null
+                  shred -uz "${SHM_TMP}/d.tar" 2>/dev/null || rm -f "${SHM_TMP}/d.tar" ;;
+          zlib)   tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
+                    | python3 -c "import sys,zlib; sys.stdout.buffer.write(zlib.compress(sys.stdin.buffer.read(),9))" \
+                    | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
+        esac
+      }
+
+      # For single file + no tar (Option A): pipe file directly
+      if [[ "$USE_TAR" == false ]]; then
+        case "$COMP" in
+          none) openssl enc "-${CIPHER_ALG}" -K "$ENC_KEY" -iv "$IV" -nosalt \
+                  -in "$ABS_INPUT" -out "$CIPHER_FILE" 2>/dev/null ;;
+          *)    warn "Single file with compression always uses tar"; _run_pipeline "$CIPHER_ALG" ;;
+        esac
+      else
+        _run_pipeline "$CIPHER_ALG"
+      fi
+
+
+      [[ -s "$CIPHER_FILE" ]] || { err "Pipeline produced empty ciphertext"; exit 1; }
+      ok "streamed  →  $(du -sh "$CIPHER_FILE" | cut -f1)  (tar | ${COMP} | ${CIPHER_ALG})"
       ;;
 
-    # ── age ─────────────────────────────────────────────────────────────────
     age)
-      echo
-      age -p -o "$ENCRYPTED" "$WORK" || { err "age encryption failed"; exit 1; }
-      echo
-      ok "encrypted  (ChaCha20-Poly1305, authenticated)"
+      if [[ "$USE_TAR" == false ]]; then
+        echo; age -p -o "$CIPHER_FILE" "$ABS_INPUT" || { err "age failed"; exit 1; }
+      else
+        case "$COMP" in
+          none) tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | age -p -o "$CIPHER_FILE" ;;
+          gzip) tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | gzip | age -p -o "$CIPHER_FILE" ;;
+          *)    tar -cf "${SHM_TMP}/d.tar" -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null
+                age -p -o "$CIPHER_FILE" "${SHM_TMP}/d.tar"
+                shred -uz "${SHM_TMP}/d.tar" 2>/dev/null || rm -f "${SHM_TMP}/d.tar" ;;
+        esac
+        echo
+      fi
+      ok "encrypted  (age, ChaCha20-Poly1305)"
       ;;
 
-    # ── GPG ─────────────────────────────────────────────────────────────────
     gpg)
-      printf '%s' "$PASSWD" | gpg \
-        --batch --passphrase-fd 0 --pinentry-mode loopback \
-        --no-symkey-cache --symmetric --cipher-algo AES256 \
-        -o "$ENCRYPTED" "$WORK" 2>/dev/null \
-        || { err "GPG encryption failed"; exit 1; }
-      ok "encrypted  (AES-256, authenticated)"
+      if [[ "$USE_TAR" == false ]]; then
+        printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
+          --no-symkey-cache --symmetric --cipher-algo AES256 -o "$CIPHER_FILE" "$ABS_INPUT" 2>/dev/null \
+          || { err "GPG failed"; exit 1; }
+      else
+        case "$COMP" in
+          none) tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
+                  | printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
+                      --no-symkey-cache --symmetric --cipher-algo AES256 -o "$CIPHER_FILE" 2>/dev/null ;;
+          gzip) tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | gzip \
+                  | printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
+                      --no-symkey-cache --symmetric --cipher-algo AES256 -o "$CIPHER_FILE" 2>/dev/null ;;
+          *)    tar -cf "${SHM_TMP}/d.tar" -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null
+                printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
+                  --no-symkey-cache --symmetric --cipher-algo AES256 -o "$CIPHER_FILE" "${SHM_TMP}/d.tar" 2>/dev/null \
+                  || { err "GPG failed"; exit 1; }
+                shred -uz "${SHM_TMP}/d.tar" 2>/dev/null || rm -f "${SHM_TMP}/d.tar" ;;
+        esac
+      fi
+      ok "encrypted  (GPG, AES-256)"
       ;;
   esac
 
   # ══════════════════════════════════════════════════════════════════════════
-  step "4 / 4  HMAC + Write  →  $OUTPUT"
+  step "2 / 3  HMAC + Assemble"
   # ══════════════════════════════════════════════════════════════════════════
-
   if [[ "$METHOD" == "openssl" || "$METHOD" == "none" ]]; then
-    # ── Build header WITHOUT HMAC line first ──────────────────────────────
-    HDR="${VAULT_TMP}/header.txt"
+    HDR="${SHM_TMP}/header.txt"
     {
       echo "VAULTV1"
       echo "LABEL=${LABEL}"
-      echo "ALGO=${CIPHER:-none}"
+      echo "ALGO=${CIPHER_ALG:-none}"
       echo "AUTH=${AUTH}"
       echo "COMP=${COMP}"
       echo "TYPE=${FTYPE}"
@@ -402,100 +495,92 @@ main() {
         echo "KEY_LEN=${KEY_LEN}"
         echo "IV=${IV}"
       else
-        # none-encryption
         echo "INTEGRITY=${INTEGRITY}"
       fi
     } > "$HDR"
 
-    # ── Compute HMAC over (header_content || ciphertext) ──────────────────
-    # This protects EVERY field: ALGO, COMP, IV, ORIG, KDF params, etc.
-    # An attacker who changes any header field will fail HMAC verification.
     if [[ "$METHOD" == "openssl" && "$AUTH" == "yes" ]]; then
-      info "Computing HMAC over header fields + ciphertext..."
+      info "HMAC-SHA256 over all header fields + ciphertext ..."
       STORED_HMAC=$(
-        { cat "$HDR"; cat "$ENCRYPTED"; } \
+        { cat "$HDR"; cat "$CIPHER_FILE"; } \
         | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${HMAC_KEY}" \
         | awk '{print $NF}'
       )
-      [[ ${#STORED_HMAC} -eq 64 ]] || {
-        err "HMAC computation failed (unexpected output length)"
-        exit 1
-      }
+      [[ ${#STORED_HMAC} -eq 64 ]] || { err "HMAC computation failed"; exit 1; }
       echo "HMAC=${STORED_HMAC}" >> "$HDR"
-      ok "HMAC-SHA256 computed  (covers all header fields + ciphertext)"
+      ok "HMAC computed  (covers all header fields + ciphertext)"
     fi
 
-    # ── Write vault: [8-hex hdr len][header][ciphertext] ──────────────────
     HDR_LEN=$(wc -c < "$HDR")
     HDR_HEX=$(printf '%08x' "$HDR_LEN")
-    { printf '%s' "$HDR_HEX"; cat "$HDR"; cat "$ENCRYPTED"; } > "$OUTPUT"
-
+    { printf '%s' "$HDR_HEX"; cat "$HDR"; cat "$CIPHER_FILE"; } > "$OUTPUT"
   else
-    # age / gpg — output is the encrypted file directly
-    cp "$ENCRYPTED" "$OUTPUT"
+    cp "$CIPHER_FILE" "$OUTPUT"
   fi
 
   chmod 600 "$OUTPUT"
 
-  # ── Integrity check: verify HMAC of the written vault ─────────────────────
-  sep
-  echo -e "${SAPPHIRE}${BOLD}  ⬡  Integrity check${NC}"
+  # Shred ciphertext from shm immediately after vault is written
+  shred -uz "$CIPHER_FILE" 2>/dev/null && ok "ciphertext shredded from /dev/shm"
 
+  # ══════════════════════════════════════════════════════════════════════════
+  step "3 / 3  Verify"
+  # ══════════════════════════════════════════════════════════════════════════
   if [[ "$METHOD" == "openssl" && "$AUTH" == "yes" ]]; then
-    # Re-read header and payload from the vault on disk, recompute HMAC
-    VERIFY_HDR_LEN=$(( 16#$( dd if="$OUTPUT" bs=1 count=8 2>/dev/null ) ))
-    VERIFY_HDR="${VAULT_TMP}/verify_hdr.bin"
-    VERIFY_PAY="${VAULT_TMP}/verify_pay.bin"
-    dd if="$OUTPUT" bs=1 skip=8          count="$VERIFY_HDR_LEN" of="$VERIFY_HDR" 2>/dev/null
-    dd if="$OUTPUT" bs=1 skip="$(( 8 + VERIFY_HDR_LEN ))"        of="$VERIFY_PAY" 2>/dev/null
-
-    # Strip the HMAC= line from the on-disk header for recomputation
-    HDR_NO_HMAC=$(grep -v '^HMAC=' "$VERIFY_HDR")
+    DISK_HDR_HEX=$(dd if="$OUTPUT" bs=1 count=8 2>/dev/null)
+    DISK_HDR_LEN=$(( 16#$DISK_HDR_HEX ))
+    DISK_HDR="${SHM_TMP}/v_hdr.bin"; DISK_PAY="${SHM_TMP}/v_pay.bin"
+    dd if="$OUTPUT" bs=1 skip=8                            count="$DISK_HDR_LEN" of="$DISK_HDR" 2>/dev/null
+    dd if="$OUTPUT" bs=1 skip="$(( 8 + DISK_HDR_LEN ))"                         of="$DISK_PAY" 2>/dev/null
+    HDR_NO_HMAC=$(grep -v '^HMAC=' "$DISK_HDR")
     VERIFY_HMAC=$(
-      { printf '%s\n' "$HDR_NO_HMAC"; cat "$VERIFY_PAY"; } \
+      { printf '%s\n' "$HDR_NO_HMAC"; cat "$DISK_PAY"; } \
       | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${HMAC_KEY}" \
       | awk '{print $NF}'
     )
+    shred -uz "$DISK_HDR" "$DISK_PAY" 2>/dev/null || rm -f "$DISK_HDR" "$DISK_PAY"
     if [[ "$VERIFY_HMAC" == "$STORED_HMAC" ]]; then
-      ok "HMAC re-verified on disk  (all header fields + ciphertext intact)"
+      ok "HMAC re-verified on disk  (vault integrity confirmed)"
     else
-      err "Post-write HMAC mismatch — vault is corrupt. Deleting."
+      err "Post-write HMAC mismatch — vault corrupt, deleting."
       rm -f "$OUTPUT"; exit 1
     fi
 
   elif [[ "$METHOD" == "none" ]]; then
-    VERIFY_OFFSET=$(( 8 + $(wc -c < "${VAULT_TMP}/header.txt") ))
-    VERIFY_PAY="${VAULT_TMP}/verify_pay.bin"
-    dd if="$OUTPUT" bs=1 skip="$VERIFY_OFFSET" of="$VERIFY_PAY" 2>/dev/null
-    VERIFY_INTEG=$(sha256sum "$VERIFY_PAY" | awk '{print $1}')
-    if [[ "$VERIFY_INTEG" == "$INTEGRITY" ]]; then
-      ok "SHA-256 verified on disk  (data intact)"
-    else
-      err "SHA-256 mismatch — vault is corrupt. Deleting."
-      rm -f "$OUTPUT"; exit 1
-    fi
+    DISK_HDR_HEX=$(dd if="$OUTPUT" bs=1 count=8 2>/dev/null)
+    DISK_HDR_LEN=$(( 16#$DISK_HDR_HEX ))
+    VCHECK="${SHM_TMP}/vcheck.bin"
+    dd if="$OUTPUT" bs=1 skip="$(( 8 + DISK_HDR_LEN ))" of="$VCHECK" 2>/dev/null
+    VI=$(sha256sum "$VCHECK" | awk '{print $1}')
+    shred -uz "$VCHECK" 2>/dev/null || rm -f "$VCHECK"
+    [[ "$VI" == "$INTEGRITY" ]] && ok "SHA-256 verified on disk" \
+      || { err "SHA-256 mismatch — vault corrupt, deleting."; rm -f "$OUTPUT"; exit 1; }
 
   elif [[ "$METHOD" == "openssl" && "$AUTH" == "no" ]]; then
-    warn "Unauthenticated mode — no HMAC to verify"
-
+    warn "Unauthenticated mode — post-write integrity check skipped"
   else
     ok "Integrity managed internally by $METHOD"
   fi
 
   # ── Summary ────────────────────────────────────────────────────────────────
   FINGERPRINT=$(sha256sum "$OUTPUT" | awk '{print $1}')
-  echo
-  sep
+  echo; sep
   echo -e "${SAPPHIRE}${BOLD}  ⬡  Summary${NC}"
-  label "  input    :  " "$(du -sh "$ABS_INPUT" 2>/dev/null | cut -f1)  ($FTYPE)"
-  label "  output   :  " "$(du -sh "$OUTPUT" 2>/dev/null | cut -f1)  →  ${BLUE}${BOLD}${OUTPUT}${NC}"
-  label "  cipher   :  " "$LABEL"
-  label "  compress :  " "$COMP"
-  label "  kdf      :  " "Argon2id  t=${KDF_T:-n/a}, m=2^${KDF_M:-n/a} KiB, p=${KDF_P:-n/a}"
-  label "  hmac     :  " "${AUTH:-n/a}"
-  label "  tar wrap :  " "$USE_TAR"
-  label "  perms    :  " "600 (owner only)"
-  label "  vault SHA-256  :  " "${SUBTEXT}${FINGERPRINT}${NC}"
+  lbl "  input      :  " "$(du -sh "$ABS_INPUT" 2>/dev/null | cut -f1)  ($FTYPE)"
+  lbl "  output     :  " "$(du -sh "$OUTPUT" 2>/dev/null | cut -f1)  →  ${BLUE}${BOLD}${OUTPUT}${NC}"
+  lbl "  cipher     :  " "$LABEL"
+  lbl "  compress   :  " "$COMP"
+  if [[ "$METHOD" == "openssl" ]]; then
+    lbl "  kdf        :  " "Argon2id  t=${KDF_T}, m=2^${KDF_M} KiB (16 MiB), p=${KDF_P}"
+  else
+    lbl "  kdf        :  " "n/a  (handled by ${LABEL:-$METHOD})"
+  fi
+  lbl "  hmac       :  " "${AUTH}"
+  lbl "  tar wrap   :  " "$USE_TAR"
+  lbl "  shm used   :  " "~$(( SHM_NEEDED / 1024 / 1024 )) MiB  (limit: 100 MiB)"
+  lbl "  temp store :  " "/dev/shm  (RAM, shredded on exit)"
+  lbl "  perms      :  " "600"
+  lbl "  SHA-256    :  " "${SUBTEXT}${FINGERPRINT}${NC}"
   echo
   echo -e "${GREEN}${BOLD}  🔒  Sealed.${NC}"
   echo

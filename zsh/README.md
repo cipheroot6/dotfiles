@@ -1,0 +1,2 @@
+- replace zsh in ~/.zsh
+- and place *.zsh in ~/.config/zsh/
