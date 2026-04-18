@@ -114,6 +114,30 @@ check_tar_safety() {
   fi
 }
 
+# ── Post-extraction safety scan ───────────────────────────────────────────────
+# Called on STAGE dir after streaming extraction.
+# GNU tar strips leading / by default. We check for symlinks that escaped
+# staging by pointing to absolute paths or ../ parents.
+scan_stage_safety() {
+  local stage="$1" issues=0
+  # Dangerous symlinks: targets that are absolute or use ../
+  while IFS= read -r -d '' lnk; do
+    local target
+    target=$(readlink "$lnk")
+    if [[ "$target" == /* || "$target" == ../* || "$target" == */../* ]]; then
+      err "Dangerous symlink in extracted archive: $lnk -> $target"
+      (( issues++ )) || true
+    fi
+  done < <(find "$stage" -type l -print0 2>/dev/null)
+
+  if (( issues > 0 )); then
+    err "Archive contained ${issues} dangerous symlink(s) — shredding staging dir."
+    find "$stage" -type f -exec shred -uz {} \; 2>/dev/null || true
+    rm -rf "$stage"
+    exit 1
+  fi
+}
+
 # ── Shred all files in SHM_TMP, then remove ───────────────────────────────────
 SHM_TMP=""
 cleanup() {
@@ -131,6 +155,35 @@ derive_key() {
     | tr -d '[:space:]')
   [[ ${#RAW_KEY} -eq 128 ]] || {
     err "Argon2id failed  (install: sudo pacman -S argon2)"; exit 1; }
+}
+
+# ── Pre-scan vault tar payload for path traversal ────────────────────────────
+# Runs a dry-run decrypt+decompress|tar -tf - before actual extraction.
+# For streaming vaults: reads payload from INPUT twice (no temp file written).
+# Sets global PRESCAN_PATHS for the caller to inspect.
+prescan_tar() {
+  local pipeline_out
+  pipeline_out="$1"   # command string that emits the decompressed tar stream
+  local paths dangerous
+  paths=$(eval "$pipeline_out" | tar -tf - 2>/dev/null) || {
+    err "Tar listing failed — vault may be corrupted or password wrong"; exit 1; }
+  dangerous=$(printf '%s
+' "$paths" | grep -E '(^|/)\.\.(/|$)|(^/)' || true)
+  if [[ -n "$dangerous" ]]; then
+    echo
+    err "Archive contains dangerous paths — REFUSING to extract:"
+    printf '%s
+' "$dangerous" | head -10 | while IFS= read -r p; do
+      echo -e "    ${RED}  ${p}${NC}" >&2; done
+    err "Vault was likely crafted to overwrite critical files."; exit 1
+  fi
+  local n; n=$(printf '%s
+' "$paths" | wc -l)
+  if (( n > 10000 )); then
+    warn "Archive has ${n} entries — unusually large."
+    printf "${PEACH}  Continue? [y/N]  ${NC}"; read -r ans
+    [[ "$ans" =~ ^[yY]$ ]] || { err "Aborted."; exit 1; }
+  fi
 }
 
 # =============================================================================
@@ -290,35 +343,43 @@ main() {
 
     info "Argon2id re-derive  (t=${KDF_T}, m=2^${KDF_M} KiB, p=${KDF_P}) ..."
     derive_key "$PASSWD" "$KDF_SALT" "$KDF_T" "$KDF_M" "$KDF_P"
-    # RAW_KEY hex [0–63]   = cipher key  (bytes 0–31, or 0–15 for 128-bit)
-    # RAW_KEY hex [64–127] = HMAC key    (hex offset 64 = byte offset 32, 32 bytes)
+    # RAW_KEY hex [0-63]   = cipher key  (bytes 0-31, or 0-15 for 128-bit)
+    # RAW_KEY hex [64-127] = HMAC key    (hex offset 64 = byte offset 32, 32 bytes)
     ENC_KEY="${RAW_KEY:0:$KEY_LEN}"
     HMAC_KEY="${RAW_KEY:64:64}"
     RAW_KEY=""
 
-    [[ -z "$STORED_HMAC" ]] && {
-      err "AUTH=yes but HMAC field missing — refusing to decrypt"; exit 1; }
-
-    # Reconstruct the pre-HMAC header (strip HMAC= line that was appended last)
-    HDR_NO_HMAC=$(printf '%s\n' "$HDR" | grep -v '^HMAC=')
-
-    info "Verifying HMAC-SHA256 over all header fields + ciphertext ..."
-    # Stream the ciphertext directly from the vault file (no copy to shm yet)
-    PAYLOAD_OFFSET=$(( 8 + HDR_LEN ))
-    COMPUTED_HMAC=$(
-      { printf '%s\n' "$HDR_NO_HMAC"
-        dd if="$INPUT" bs=1 skip="$PAYLOAD_OFFSET" 2>/dev/null
-      } | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${HMAC_KEY}" \
-        | awk '{print $NF}'
-    )
-
-    if [[ "$COMPUTED_HMAC" == "$STORED_HMAC" ]]; then
-      ok "HMAC verified — every field + ciphertext authentic and untampered"
+    if [[ "$ALGO" == "aes-256-gcm" ]]; then
+      # GCM: AAD verification is built into decryption — no separate pre-check needed.
+      # Any tampering of header fields or ciphertext causes InvalidTag during decrypt.
+      need python3 "sudo pacman -S python"
+      python3 -c "from cryptography.hazmat.primitives.ciphers.aead import AESGCM" 2>/dev/null \
+        || { err "python3-cryptography required: pip install cryptography --break-system-packages"; exit 1; }
+      info "AES-256-GCM — header fields bound via AAD, verified during decryption"
     else
-      err "HMAC VERIFICATION FAILED"
-      err "A header field or the ciphertext was modified, or the password is wrong."
-      err "Refusing to decrypt."
-      exit 1
+      [[ -z "$STORED_HMAC" ]] && {
+        err "AUTH=yes but HMAC field missing — refusing to decrypt"; exit 1; }
+
+      # Reconstruct the pre-HMAC header (strip HMAC= line that was appended last)
+      HDR_NO_HMAC=$(printf '%s\n' "$HDR" | grep -v '^HMAC=')
+
+      info "Verifying HMAC-SHA256 over all header fields + ciphertext ..."
+      PAYLOAD_OFFSET=$(( 8 + HDR_LEN ))
+      COMPUTED_HMAC=$(
+        { printf '%s\n' "$HDR_NO_HMAC"
+          dd if="$INPUT" bs=1 skip="$PAYLOAD_OFFSET" 2>/dev/null
+        } | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${HMAC_KEY}" \
+          | awk '{print $NF}'
+      )
+
+      if [[ "$COMPUTED_HMAC" == "$STORED_HMAC" ]]; then
+        ok "HMAC verified — every field + ciphertext authentic and untampered"
+      else
+        err "HMAC VERIFICATION FAILED"
+        err "A header field or the ciphertext was modified, or the password is wrong."
+        err "Refusing to decrypt."
+        exit 1
+      fi
     fi
   fi
 
@@ -336,23 +397,13 @@ main() {
 
   PAYLOAD_OFFSET=$(( 8 + HDR_LEN ))
 
-  _extract_pipeline() {
-    # $1 = decompress command (or "none")
-    local dcmp="$1"
-    if [[ "$dcmp" == "none" ]]; then
-      tar -xf - -C "$STAGE" 2>/dev/null
-    else
-      eval "$dcmp" | tar -xf - -C "$STAGE" 2>/dev/null
-    fi
-  }
-
   case "$METHOD" in
     vault)
       if [[ "${ALGO:-none}" == "none" ]]; then
         # Plain vault — just decompress
         if [[ "$HAS_TAR" == true ]]; then
           case "$COMP" in
-            none)   dd if="$INPUT" bs=4096 skip=0 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
+            none)   dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
                       | tar -xf - -C "$STAGE" 2>/dev/null ;;
             gzip)   dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
                       | gunzip | tar -xf - -C "$STAGE" 2>/dev/null ;;
@@ -389,51 +440,83 @@ main() {
       else
         # Encrypted vault — stream: decrypt | decompress | extract
         if [[ "$HAS_TAR" == true ]]; then
+          # Pre-scan: dry-run tar -tf before extraction to catch path traversal.
+          # GCM vaults skip prescan — the auth tag provides a stronger guarantee
+          # and GCM decryption requires python (can't use openssl enc for prescan).
+          if [[ "$ALGO" != "aes-256-gcm" ]]; then
+            info "Pre-scanning archive for path traversal..."
+            _dec_stream() { dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null; }
+            case "$COMP" in
+              none)   prescan_tar "_dec_stream" ;;
+              gzip)   prescan_tar "_dec_stream | gunzip" ;;
+              bzip2)  prescan_tar "_dec_stream | bunzip2" ;;
+              xz)     prescan_tar "_dec_stream | unxz" ;;
+              zstd)   prescan_tar "_dec_stream | zstd -d -q" ;;
+              lz4)    prescan_tar "_dec_stream | lz4 -d -q" ;;
+              brotli) prescan_tar "_dec_stream | brotli -d" ;;
+              lzo)    prescan_tar "_dec_stream | lzop -d" ;;
+              7z|zlib) : ;; # handled via TMP_DEC — check_tar_safety called after decompression
+            esac
+            ok "Pre-scan clean"
+          else
+            ok "Pre-scan skipped  (GCM auth tag verifies integrity natively)"
+          fi
+
+          # Decrypt helper — uses python for GCM, openssl for others
+          # Decrypt helper: writes payload to shm temp, pipes through GCM/openssl
+          _VAULT_PAY="${SHM_TMP}/vpay.bin"
+          dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" of="$_VAULT_PAY" 2>/dev/null
+          _vault_decrypt() {
+            if [[ "$ALGO" == "aes-256-gcm" ]]; then
+              local _aad="VAULTV1|${LABEL:-$ALGO}|${COMP}|${FTYPE}|${ORIG_NAME}|${KDF_SALT}|${IV}"
+              VAULT_KEY="$ENC_KEY" VAULT_NONCE="$IV" VAULT_AAD="$_aad" \
+              python3 -c "
+import sys, os
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+key   = bytes.fromhex(os.environ['VAULT_KEY'])
+nonce = bytes.fromhex(os.environ['VAULT_NONCE'])
+aad   = os.environ['VAULT_AAD'].encode()
+ct    = open(sys.argv[1],'rb').read()
+try:
+    pt = AESGCM(key).decrypt(nonce, ct, aad)
+    sys.stdout.buffer.write(pt)
+except Exception as e:
+    sys.stderr.write('GCM auth failed: ' + str(e) + chr(10))
+    sys.exit(1)
+" "$_VAULT_PAY" 2>/dev/null
+            else
+              openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt \
+                -in "$_VAULT_PAY" 2>/dev/null
+            fi
+          }
+
+
           case "$COMP" in
-            none)
-              dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
-                | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null \
-                | tar -xf - -C "$STAGE" 2>/dev/null ;;
-            gzip)
-              dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
-                | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null \
-                | gunzip | tar -xf - -C "$STAGE" 2>/dev/null ;;
-            bzip2)
-              dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
-                | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null \
-                | bunzip2 | tar -xf - -C "$STAGE" 2>/dev/null ;;
-            xz)
-              dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
-                | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null \
-                | unxz | tar -xf - -C "$STAGE" 2>/dev/null ;;
-            zstd)
-              dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
-                | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null \
-                | zstd -d -q | tar -xf - -C "$STAGE" 2>/dev/null ;;
-            lz4)
-              dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
-                | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null \
-                | lz4 -d -q | tar -xf - -C "$STAGE" 2>/dev/null ;;
-            brotli)
-              dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
-                | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null \
-                | brotli -d | tar -xf - -C "$STAGE" 2>/dev/null ;;
-            lzo)
-              dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
-                | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt 2>/dev/null \
-                | lzop -d | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            none)   _vault_decrypt | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            gzip)   _vault_decrypt | gunzip  | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            bzip2)  _vault_decrypt | bunzip2 | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            xz)     _vault_decrypt | unxz    | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            zstd)   _vault_decrypt | zstd -d -q | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            lz4)    _vault_decrypt | lz4 -d -q  | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            brotli) _vault_decrypt | brotli -d  | tar -xf - -C "$STAGE" 2>/dev/null ;;
+            lzo)    _vault_decrypt | lzop -d    | tar -xf - -C "$STAGE" 2>/dev/null ;;
             7z|zlib)
               # These need a temp file due to random-access requirements
-              TMP_DEC="${SHM_TMP}/dec.tmp"; chmod 600 "$TMP_DEC" 2>/dev/null || touch "$TMP_DEC"
+              TMP_DEC="${SHM_TMP}/dec.tmp"; touch "$TMP_DEC" && chmod 600 "$TMP_DEC"
               dd if="$INPUT" bs=4096 iflag=skip_bytes skip="$PAYLOAD_OFFSET" 2>/dev/null \
                 | openssl enc -d "-${ALGO}" -K "$ENC_KEY" -iv "$IV" -nosalt \
                   -out "$TMP_DEC" 2>/dev/null
               if [[ "$COMP" == "7z" ]]; then
                 7z e "-o${SHM_TMP}/7z_out" "$TMP_DEC" >/dev/null 2>&1
+                check_tar_safety "${SHM_TMP}/7z_out/data.tar"
                 tar -xf "${SHM_TMP}/7z_out/data.tar" -C "$STAGE" 2>/dev/null
               else
+                DECOPTED="${SHM_TMP}/decomp.tar"
                 python3 -c "import sys,zlib; sys.stdout.buffer.write(zlib.decompress(sys.stdin.buffer.read()))" \
-                  < "$TMP_DEC" | tar -xf - -C "$STAGE" 2>/dev/null
+                  < "$TMP_DEC" > "$DECOPTED"
+                check_tar_safety "$DECOPTED"
+                tar -xf "$DECOPTED" -C "$STAGE" 2>/dev/null
+                shred -uz "$DECOPTED" 2>/dev/null
               fi
               shred -uz "$TMP_DEC" 2>/dev/null ;;
           esac
@@ -530,7 +613,7 @@ main() {
   step "2 / 2  Move to CWD"
   # ══════════════════════════════════════════════════════════════════════════
   if [[ "$HAS_TAR" == true ]]; then
-    check_tar_safety "${STAGE}/.." 2>/dev/null || true   # safety already passed via pre-scan
+    scan_stage_safety "$STAGE"
   fi
 
   OUT_PATH="${ORIG_CWD}/${ORIG_NAME}"

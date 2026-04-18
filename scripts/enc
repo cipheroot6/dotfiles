@@ -87,7 +87,7 @@ prompt_choice() {
 }
 
 pw_strength() {
-  local pw="$1" score=0 len=${#pw}
+  local pw="$1" score=0 len=0; len=${#pw}
   (( len >= 8  )) && (( score++ ))
   (( len >= 12 )) && (( score++ ))
   (( len >= 16 )) && (( score++ ))
@@ -189,37 +189,27 @@ main() {
 
   # ──────────────────────────────────────────────────────────────────────────
   section "Encryption"
-  menu_item "★"  1 "AES-256-CTR + HMAC-SHA256"  "recommended default"
-  menu_item "★"  2 "ChaCha20   + HMAC-SHA256"   "recommended without AES-NI"
-  menu_item " "  3 "AES-128-CTR + HMAC-SHA256"  "faster, slightly weaker key"
-  menu_item " "  4 "age"                         "modern, ChaCha20-Poly1305"
-  menu_item " "  5 "GPG"                         "PGP compatible"
-  menu_sep "unauthenticated"
-  menu_item "⚠"  6 "ChaCha20"                    "no tamper detection"
-  menu_item "⚠"  7 "AES-256-CBC"                 "legacy only"
-  menu_item "⚠"  8 "AES-256-CTR"                 "legacy only"
-  menu_item "⚠"  9 "AES-128-CBC"                 "legacy only"
-  menu_item "⚠" 10 "none"                         "no encryption"
-  prompt_choice 10 1
+  menu_item "★"  1 "AES-256-GCM"                "best default, native AEAD  (requires python3-cryptography)"
+  menu_item "★"  2 "AES-256-CTR + HMAC-SHA256"  "recommended, no extra deps"
+  menu_item "★"  3 "ChaCha20   + HMAC-SHA256"   "best without AES-NI hardware"
+  menu_item " "  4 "AES-128-CTR + HMAC-SHA256"  "faster, slightly weaker key"
+  menu_item " "  5 "age"                         "modern, ChaCha20-Poly1305"
+  menu_item " "  6 "none"                         "no encryption  ⚠  plain data"
+  prompt_choice 6 1
 
   METHOD="openssl"; CIPHER_ALG=""; AUTH="no"; KEY_LEN=64; LABEL=""
   case "$CHOICE" in
-    1) CIPHER_ALG="aes-256-ctr"; AUTH="yes"; KEY_LEN=64; LABEL="AES-256-CTR+HMAC-SHA256" ;;
-    2) CIPHER_ALG="chacha20";    AUTH="yes"; KEY_LEN=64; LABEL="ChaCha20+HMAC-SHA256"     ;;
-    3) CIPHER_ALG="aes-128-ctr"; AUTH="yes"; KEY_LEN=32; LABEL="AES-128-CTR+HMAC-SHA256" ;;
-    4) METHOD="age";                                  LABEL="age"                      ;;
-    5) METHOD="gpg";                                  LABEL="gpg"                      ;;
-    6) CIPHER_ALG="chacha20";    AUTH="no";  KEY_LEN=64; LABEL="ChaCha20"                 ;;
-    7) CIPHER_ALG="aes-256-cbc"; AUTH="no";  KEY_LEN=64; LABEL="AES-256-CBC"              ;;
-    8) CIPHER_ALG="aes-256-ctr"; AUTH="no";  KEY_LEN=64; LABEL="AES-256-CTR"              ;;
-    9) CIPHER_ALG="aes-128-cbc"; AUTH="no";  KEY_LEN=32; LABEL="AES-128-CBC"              ;;
-   10) METHOD="none";                                 LABEL="none"                     ;;
+    1) CIPHER_ALG="aes-256-gcm"; AUTH="yes"; KEY_LEN=64; LABEL="AES-256-GCM"              ;;
+    2) CIPHER_ALG="aes-256-ctr"; AUTH="yes"; KEY_LEN=64; LABEL="AES-256-CTR+HMAC-SHA256"  ;;
+    3) CIPHER_ALG="chacha20";    AUTH="yes"; KEY_LEN=64; LABEL="ChaCha20+HMAC-SHA256"      ;;
+    4) CIPHER_ALG="aes-128-ctr"; AUTH="yes"; KEY_LEN=32; LABEL="AES-128-CTR+HMAC-SHA256"  ;;
+    5) METHOD="age";                                     LABEL="age"                       ;;
+    6) METHOD="none";                                    LABEL="none"                      ;;
   esac
 
   case "$METHOD" in
     openssl) need argon2 "sudo pacman -S argon2" ;;
     age)     need age    "sudo pacman -S age"     ;;
-    gpg)     need gpg    "sudo pacman -S gnupg"  ;;
   esac
 
   if [[ "$METHOD" == "none" ]]; then
@@ -292,11 +282,15 @@ main() {
     while true; do
       printf "  ${LAVENDER}${BOLD}Password :  ${NC}"; read -rs PASSWD; echo
       [[ -z "$PASSWD" ]] && { warn "Password cannot be empty"; echo; continue; }
+
+      printf "  ${LAVENDER}${BOLD}Confirm  :  ${NC}"; read -rs P2; echo
+      if [[ "$PASSWD" != "$P2" ]]; then
+        warn "Passwords don't match — try again"; echo; continue
+      fi
+
       echo -e "  ${SUBTEXT}Strength :  ${NC}$(pw_strength "$PASSWD")"
       echo
-      printf "  ${LAVENDER}${BOLD}Confirm  :  ${NC}"; read -rs P2; echo
-      [[ "$PASSWD" == "$P2" ]] && break
-      warn "Passwords don't match — try again"; echo
+      break
     done; echo
   elif [[ "$METHOD" == "age" ]]; then
     info "age will prompt for passphrase during encryption"; echo
@@ -305,7 +299,7 @@ main() {
   # ── Option A: single file + no comp + age/gpg = skip tar ──────────────────
   USE_TAR=true
   if [[ "$FTYPE" == "file" && "$COMP" == "none" \
-        && ( "$METHOD" == "age" || "$METHOD" == "gpg" ) ]]; then
+        && "$METHOD" == "age" ]]; then
     USE_TAR=false
   fi
 
@@ -341,7 +335,7 @@ main() {
   # No uncompressed tar file, no unencrypted compressed file — ever.
 
   CIPHER_FILE="${SHM_TMP}/payload.enc"
-  chmod 600 "$CIPHER_FILE" 2>/dev/null || touch "$CIPHER_FILE" && chmod 600 "$CIPHER_FILE"
+  touch "$CIPHER_FILE" && chmod 600 "$CIPHER_FILE"
 
   case "$METHOD" in
     none)
@@ -357,7 +351,7 @@ main() {
           lzo)    tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | lzop > "$CIPHER_FILE" ;;
           brotli) tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | brotli > "$CIPHER_FILE" ;;
           7z)     tar -cf "${SHM_TMP}/d.tar" -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null
-                  7z a -t7z -mx=9 -mmt=on -si "${SHM_TMP}/d.tar" > "$CIPHER_FILE" 2>/dev/null
+                  7z a -t7z -mx=9 -mmt=on -so dummy "${SHM_TMP}/d.tar" > "$CIPHER_FILE" 2>/dev/null
                   shred -uz "${SHM_TMP}/d.tar" 2>/dev/null || rm -f "${SHM_TMP}/d.tar" ;;
           zlib)   tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
                     | python3 -c "import sys,zlib; sys.stdout.buffer.write(zlib.compress(sys.stdin.buffer.read(),9))" \
@@ -372,7 +366,14 @@ main() {
 
     openssl)
       KDF_SALT=$(openssl rand -hex 16)
-      IV=$(openssl rand -hex 16)
+      # GCM uses 12-byte nonce; CTR/CBC use 16-byte IV
+      if [[ "$CIPHER_ALG" == "aes-256-gcm" ]]; then
+        IV=$(openssl rand -hex 12)   # 96-bit nonce for GCM
+        need python3 "sudo pacman -S python"
+        python3 -c "from cryptography.hazmat.primitives.ciphers.aead import AESGCM" 2>/dev/null           || { err "python3-cryptography not installed. Install: pip install cryptography --break-system-packages"; exit 1; }
+      else
+        IV=$(openssl rand -hex 16)   # 128-bit IV for CTR/CBC
+      fi
       info "Argon2id  (t=${KDF_T}, m=2^${KDF_M} KiB = 16 MiB, p=${KDF_P}) ..."
       derive_key "$PASSWD" "$KDF_SALT" "$KDF_T" "$KDF_M" "$KDF_P"
       # RAW_KEY hex [0–63]   = cipher key  (bytes 0–31, or 0–15 for 128-bit)
@@ -386,44 +387,52 @@ main() {
       # CIPHER_ALG already set above
       
 
+      # Encrypt function: pipes compressed data through either openssl or python AES-256-GCM
+      _do_encrypt() {
+        local in_fd="/dev/stdin"
+        if [[ "$CIPHER_ALG" == "aes-256-gcm" ]]; then
+          # AES-256-GCM via python3 cryptography — native AEAD, no separate HMAC needed
+          # AAD binds all header fields to the ciphertext
+          local aad="VAULTV1|${LABEL}|${COMP}|${FTYPE}|${ORIG_NAME}|${KDF_SALT}|${IV}"
+          VAULT_KEY="$ENC_KEY" VAULT_NONCE="$IV" VAULT_AAD="$aad"           python3 -c "
+import sys, os
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+key   = bytes.fromhex(os.environ['VAULT_KEY'])
+nonce = bytes.fromhex(os.environ['VAULT_NONCE'])
+aad   = os.environ['VAULT_AAD'].encode()
+ct    = AESGCM(key).encrypt(nonce, sys.stdin.buffer.read(), aad)
+sys.stdout.buffer.write(ct)
+" > "$CIPHER_FILE" 2>/dev/null
+        else
+          openssl enc "-${CIPHER_ALG}" -K "$ENC_KEY" -iv "$IV" -nosalt             -out "$CIPHER_FILE" 2>/dev/null
+        fi
+      }
+
       _run_pipeline() {
-        local src="$1"
         case "$COMP" in
-          none)   tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
-                    | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
-          gzip)   tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
-                    | gzip | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
-          bzip2)  tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
-                    | bzip2 | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
-          xz)     tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
-                    | xz -T0 | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
-          zstd)   tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
-                    | zstd -T0 -q | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
-          lz4)    tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
-                    | lz4 -q | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
-          lzo)    tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
-                    | lzop | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
-          brotli) tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
-                    | brotli | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
+          none)   tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | _do_encrypt ;;
+          gzip)   tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | gzip   | _do_encrypt ;;
+          bzip2)  tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | bzip2  | _do_encrypt ;;
+          xz)     tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | xz -T0 | _do_encrypt ;;
+          zstd)   tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | zstd -T0 -q | _do_encrypt ;;
+          lz4)    tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | lz4 -q     | _do_encrypt ;;
+          lzo)    tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | lzop       | _do_encrypt ;;
+          brotli) tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | brotli     | _do_encrypt ;;
           7z)     tar -cf "${SHM_TMP}/d.tar" -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null
-                  7z a -t7z -mx=9 -mmt=on -so "${SHM_TMP}/d.tar" 2>/dev/null \
-                    | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null
+                  7z a -t7z -mx=9 -mmt=on -so dummy "${SHM_TMP}/d.tar" 2>/dev/null | _do_encrypt
                   shred -uz "${SHM_TMP}/d.tar" 2>/dev/null || rm -f "${SHM_TMP}/d.tar" ;;
-          zlib)   tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
-                    | python3 -c "import sys,zlib; sys.stdout.buffer.write(zlib.compress(sys.stdin.buffer.read(),9))" \
-                    | openssl enc "-${src}" -K "$ENC_KEY" -iv "$IV" -nosalt -out "$CIPHER_FILE" 2>/dev/null ;;
+          zlib)   tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null                     | python3 -c "import sys,zlib; sys.stdout.buffer.write(zlib.compress(sys.stdin.buffer.read(),9))"                     | _do_encrypt ;;
         esac
       }
 
       # For single file + no tar (Option A): pipe file directly
       if [[ "$USE_TAR" == false ]]; then
         case "$COMP" in
-          none) openssl enc "-${CIPHER_ALG}" -K "$ENC_KEY" -iv "$IV" -nosalt \
-                  -in "$ABS_INPUT" -out "$CIPHER_FILE" 2>/dev/null ;;
-          *)    warn "Single file with compression always uses tar"; _run_pipeline "$CIPHER_ALG" ;;
+          none) _do_encrypt < "$ABS_INPUT" ;;
+          *)    _run_pipeline ;;
         esac
       else
-        _run_pipeline "$CIPHER_ALG"
+        _run_pipeline
       fi
 
 
@@ -445,29 +454,6 @@ main() {
         echo
       fi
       ok "encrypted  (age, ChaCha20-Poly1305)"
-      ;;
-
-    gpg)
-      if [[ "$USE_TAR" == false ]]; then
-        printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
-          --no-symkey-cache --symmetric --cipher-algo AES256 -o "$CIPHER_FILE" "$ABS_INPUT" 2>/dev/null \
-          || { err "GPG failed"; exit 1; }
-      else
-        case "$COMP" in
-          none) tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null \
-                  | printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
-                      --no-symkey-cache --symmetric --cipher-algo AES256 -o "$CIPHER_FILE" 2>/dev/null ;;
-          gzip) tar -cf - -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null | gzip \
-                  | printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
-                      --no-symkey-cache --symmetric --cipher-algo AES256 -o "$CIPHER_FILE" 2>/dev/null ;;
-          *)    tar -cf "${SHM_TMP}/d.tar" -C "$PARENT_DIR" "$ORIG_NAME" 2>/dev/null
-                printf '%s' "$PASSWD" | gpg --batch --passphrase-fd 0 --pinentry-mode loopback \
-                  --no-symkey-cache --symmetric --cipher-algo AES256 -o "$CIPHER_FILE" "${SHM_TMP}/d.tar" 2>/dev/null \
-                  || { err "GPG failed"; exit 1; }
-                shred -uz "${SHM_TMP}/d.tar" 2>/dev/null || rm -f "${SHM_TMP}/d.tar" ;;
-        esac
-      fi
-      ok "encrypted  (GPG, AES-256)"
       ;;
   esac
 
@@ -500,15 +486,20 @@ main() {
     } > "$HDR"
 
     if [[ "$METHOD" == "openssl" && "$AUTH" == "yes" ]]; then
-      info "HMAC-SHA256 over all header fields + ciphertext ..."
-      STORED_HMAC=$(
-        { cat "$HDR"; cat "$CIPHER_FILE"; } \
-        | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${HMAC_KEY}" \
-        | awk '{print $NF}'
-      )
-      [[ ${#STORED_HMAC} -eq 64 ]] || { err "HMAC computation failed"; exit 1; }
-      echo "HMAC=${STORED_HMAC}" >> "$HDR"
-      ok "HMAC computed  (covers all header fields + ciphertext)"
+      if [[ "$CIPHER_ALG" == "aes-256-gcm" ]]; then
+        # AES-256-GCM binds header fields via AAD internally — no separate HMAC needed
+        ok "GCM authentication tag embedded in ciphertext  (header bound via AAD)"
+      else
+        info "HMAC-SHA256 over all header fields + ciphertext ..."
+        STORED_HMAC=$(
+          { cat "$HDR"; cat "$CIPHER_FILE"; } \
+          | openssl dgst -sha256 -mac HMAC -macopt "hexkey:${HMAC_KEY}" \
+          | awk '{print $NF}'
+        )
+        [[ ${#STORED_HMAC} -eq 64 ]] || { err "HMAC computation failed"; exit 1; }
+        echo "HMAC=${STORED_HMAC}" >> "$HDR"
+        ok "HMAC computed  (covers all header fields + ciphertext)"
+      fi
     fi
 
     HDR_LEN=$(wc -c < "$HDR")
@@ -526,7 +517,37 @@ main() {
   # ══════════════════════════════════════════════════════════════════════════
   step "3 / 3  Verify"
   # ══════════════════════════════════════════════════════════════════════════
-  if [[ "$METHOD" == "openssl" && "$AUTH" == "yes" ]]; then
+  if [[ "$METHOD" == "openssl" && "$CIPHER_ALG" == "aes-256-gcm" ]]; then
+    # GCM: trial-decrypt the on-disk payload to confirm the auth tag survived the write.
+    DISK_HDR_HEX=$(dd if="$OUTPUT" bs=1 count=8 2>/dev/null)
+    DISK_HDR_LEN=$(( 16#$DISK_HDR_HEX ))
+    DISK_PAY="${SHM_TMP}/v_pay.bin"
+    dd if="$OUTPUT" bs=1 skip="$(( 8 + DISK_HDR_LEN ))" of="$DISK_PAY" 2>/dev/null
+    GCM_AAD="VAULTV1|${LABEL}|${COMP}|${FTYPE}|${ORIG_NAME}|${KDF_SALT}|${IV}"
+    VAULT_KEY="$ENC_KEY" VAULT_NONCE="$IV" VAULT_AAD="$GCM_AAD" \
+    python3 -c "
+import sys, os
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+key   = bytes.fromhex(os.environ['VAULT_KEY'])
+nonce = bytes.fromhex(os.environ['VAULT_NONCE'])
+aad   = os.environ['VAULT_AAD'].encode()
+ct    = open(sys.argv[1], 'rb').read()
+try:
+    AESGCM(key).decrypt(nonce, ct, aad)
+except Exception as e:
+    sys.stderr.write(str(e) + '\\n')
+    sys.exit(1)
+" "$DISK_PAY" 2>/dev/null
+    GCM_RC=$?
+    shred -uz "$DISK_PAY" 2>/dev/null || rm -f "$DISK_PAY"
+    if (( GCM_RC == 0 )); then
+      ok "GCM tag re-verified on disk  (vault integrity confirmed)"
+    else
+      err "GCM post-write verification failed — vault corrupt, deleting."
+      rm -f "$OUTPUT"; exit 1
+    fi
+
+  elif [[ "$METHOD" == "openssl" && "$AUTH" == "yes" ]]; then
     DISK_HDR_HEX=$(dd if="$OUTPUT" bs=1 count=8 2>/dev/null)
     DISK_HDR_LEN=$(( 16#$DISK_HDR_HEX ))
     DISK_HDR="${SHM_TMP}/v_hdr.bin"; DISK_PAY="${SHM_TMP}/v_pay.bin"
@@ -577,7 +598,6 @@ main() {
   fi
   lbl "  hmac       :  " "${AUTH}"
   lbl "  tar wrap   :  " "$USE_TAR"
-  lbl "  shm used   :  " "~$(( SHM_NEEDED / 1024 / 1024 )) MiB  (limit: 100 MiB)"
   lbl "  temp store :  " "/dev/shm  (RAM, shredded on exit)"
   lbl "  perms      :  " "600"
   lbl "  SHA-256    :  " "${SUBTEXT}${FINGERPRINT}${NC}"
