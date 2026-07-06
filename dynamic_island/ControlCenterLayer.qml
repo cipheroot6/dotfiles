@@ -657,6 +657,10 @@ Item {
 
     Process { id: brightnessSetter }
     Process { id: volumeSetter }
+    Process { id: actionExec }
+
+    property var onTodoToggle: null
+    property var onPomodoroToggle: null
 
     Timer {
         id: brightnessApplyTimer
@@ -1466,6 +1470,49 @@ Item {
                             controlCenter.flushVolume(true);
                         }
                         onCanceled: volumeGetter.exec(["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"])
+                    }
+                }
+            }
+        }
+
+        // ── Quick action buttons ──────────────────────────────────────────────
+        Row {
+            id: actionRow
+            width: parent.width
+            spacing: 8
+
+            Repeater {
+                model: userConfig.controlCenterActions
+                delegate: Rectangle {
+                    required property var modelData
+                    required property int index
+                    width:  (actionRow.width - 24) / 4
+                    height: 44
+                    radius: 14
+                    color: btnMouse.containsMouse ? Qt.rgba(1,1,1,0.1) : Qt.rgba(1,1,1,0.05)
+                    Behavior on color { ColorAnimation { duration: 120 } }
+
+                    Text {
+                        anchors.centerIn: parent
+                        text:  modelData.icon
+                        color: "#cdd6f4"
+                        font.pixelSize: 18
+                        font.family:    controlCenter.iconFontFamily
+                    }
+
+                    MouseArea {
+                        id: btnMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: {
+                            if (index === 2) {
+                                if (controlCenter.onTodoToggle) controlCenter.onTodoToggle();
+                            } else if (index === 3) {
+                                if (controlCenter.onPomodoroToggle) controlCenter.onPomodoroToggle();
+                            } else {
+                                actionExec.exec(["sh", "-c", modelData.command]);
+                            }
+                        }
                     }
                 }
             }

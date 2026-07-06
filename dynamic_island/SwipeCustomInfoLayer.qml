@@ -15,6 +15,8 @@ Item {
     property string timeFontFamily: userConfig.timeFontFamily
     property bool showCondition: false
     property bool showSecondaryText: true
+    property bool persistentRingActive: false
+    property bool bothRunning: false
     property real transitionProgress: 0
     property real minimumWidth: 220
     property real maximumWidth: minimumWidth
@@ -178,8 +180,13 @@ Item {
 
     Text {
         visible: timeText !== "" && showSecondaryText
-        x: timeX
-        width: textWidth
+        id: timeTextItem
+        x: (clampedProgress > 0)
+            ? timeX
+            : (userConfig.petEnabled ? 58 : (root.bothRunning ? 56 : (root.persistentRingActive ? 16 : (parent.width - implicitWidth) / 2)))
+        width: (clampedProgress > 0)
+            ? textWidth
+            : (userConfig.petEnabled ? (parent.width - 58 - 16) : implicitWidth)
         anchors.verticalCenter: parent.verticalCenter
         text: timeText
         color: "white"
@@ -188,7 +195,9 @@ Item {
         font.family: timeFontFamily
         font.weight: Font.Bold
         font.letterSpacing: -0.25
-        horizontalAlignment: Text.AlignHCenter
+        horizontalAlignment: (clampedProgress > 0 || userConfig.petEnabled || root.persistentRingActive || root.bothRunning)
+            ? Text.AlignLeft
+            : Text.AlignHCenter
         elide: Text.ElideRight
         wrapMode: Text.NoWrap
     }

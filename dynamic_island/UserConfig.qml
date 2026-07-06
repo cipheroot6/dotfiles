@@ -1,34 +1,31 @@
 import QtQuick
 
 QtObject {
+    // Mouse buttons in this file use simple numbers:
+    // 1 = left click, 2 = middle click, 3 = right click.
+    // These fields are meant to use the simple numbers above, not Qt's raw enum values.
+
     id: userConfig
 
     property string wallpaperPath: "/home/cipheroot/.config/hypr/wallpaper.png"
+    property bool petEnabled: false
     property real workspaceOverviewWindowRadius: 12
     property string iconFontFamily: "JetBrainsMono Nerd Font"
     property string textFontFamily: "Inter Display"
     property string heroFontFamily: "Inter Display"
     property string timeFontFamily: "Inter Display"
-
     // Set these to `0` if you want to disable the in-overview key handling.
     property int overviewCloseKey: Qt.Key_Escape
     property int overviewPreviousWorkspaceKey: Qt.Key_Left
     property int overviewNextWorkspaceKey: Qt.Key_Right
-
     // This registers a Hyprland global shortcut action for the workspace overview.
     property string overviewGlobalShortcutAppid: "quickshell"
     property string overviewGlobalShortcutName: "dynamic-island-overview"
-
-    // Mouse buttons in this file use simple numbers:
-    // 1 = left click, 2 = middle click, 3 = right click.
-    // These fields are meant to use the simple numbers above, not Qt's raw enum values.
-
     // Workspace overview mouse bindings.
     property int workspaceOverviewWorkspaceActivateButton: 1
     property int workspaceOverviewWindowDragButton: 1
     property int workspaceOverviewWindowFocusButton: 1
     property int workspaceOverviewWindowCloseButton: 3
-
     // Dynamic Island mouse bindings.
     // Supported click actions:
     // "none", "toggleExpandedPlayer", "openExpandedPlayer", "closeExpandedPlayer",
@@ -42,28 +39,31 @@ QtObject {
     property string dynamicIslandSecondaryAction: "toggleControlCenter"
     // Supported built-in left swipe items:
     // "time", "date", "battery", "volume", "brightness", "workspace","cpu", "ram", "cava"
-    property var dynamicIslandLeftSwipeItems: (["cava","battery"])
-
+    property var dynamicIslandLeftSwipeItems: (["cava", "battery"])
     property var scriptPaths: ({
-        button_1: "/home/cipheroot/.local/bin/quickshell_script/wifi-menu.sh",
-        button_2: "/home/cipheroot/.local/bin/quickshell_script/bluetooth-menu.sh",
-        button_3: "/home/cipheroot/.local/bin/quickshell_script/wallpaper-switch.sh",
-        button_4: "/home/cipheroot/.local/bin/quickshell_script/powermenu"
+        "button_1": "/home/cipheroot/.local/bin/quickshell_script/wifi-menu.sh",
+        "button_2": "/home/cipheroot/.local/bin/quickshell_script/bluetooth-menu.sh",
+        "button_3": "/home/cipheroot/.local/bin/quickshell_script/wallpaper-switch.sh",
+        "button_4": "/home/cipheroot/.local/bin/quickshell_script/powermenu"
     })
-
-    property var controlCenterActions: ([
-        { icon: "", command: scriptPaths.button_1 },
-        { icon: "", command: scriptPaths.button_2 },
-        { icon: "󰋩", command: scriptPaths.button_3 },
-        { icon: "󰣇", command: scriptPaths.button_4 }
-    ])
-
+    property var controlCenterActions: ([{
+        "icon": "󰤨",
+        "command": scriptPaths.button_1
+    }, {
+        "icon": "󰂯",
+        "command": scriptPaths.button_2
+    }, {
+        "icon": "󰄬",
+        "command": "__todo__"
+    }, {
+        "icon": "󰔛",
+        "command": "__pomodoro__"
+    }])
     property var controlCenterIcons: ({
         "charging": "",
         "brightness": "󰃟",
         "volume": "󰕾"
     })
-
     property var statusIcons: ({
         "default": "🎧",
         "notification": "",
@@ -100,11 +100,10 @@ QtObject {
 
         if (Array.isArray(buttons)) {
             let mask = Qt.NoButton;
-            for (let index = 0; index < buttons.length; index++)
-                mask |= mouseButton(buttons[index]);
+            for (let index = 0; index < buttons.length; index++) mask |= mouseButton(buttons[index])
             return mask;
         }
-
         return mouseButton(buttons);
     }
+
 }

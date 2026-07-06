@@ -10,6 +10,12 @@ Scope {
         id: userConfig
     }
 
+    function toggleTodo() {
+        // Close control center on all windows first
+        shellRoot.forEachWindow((w) => { if (w && w.closeControlCenter) w.closeControlCenter(); });
+        todoVariants.instances.forEach((w) => { if (w) w.toggle(); });
+    }
+
     function forEachWindow(callback) {
         const windows = panelVariants.instances ? panelVariants.instances : [];
         for (let index = 0; index < windows.length; index++) {
@@ -83,6 +89,60 @@ Scope {
         onPressed: shellRoot.toggleOverviewAll()
     }
 
+    GlobalShortcut {
+        appid: userConfig.overviewGlobalShortcutAppid
+        name: "dynamic-island-time-hold"
+
+        onPressed: {
+            shellRoot.forEachWindow((w) => {
+                if (w && w.tempShowTime)
+                    w.tempShowTime();
+            });
+        }
+
+        onReleased: {
+            shellRoot.forEachWindow((w) => {
+                if (w && w.restoreFromTempShowTime)
+                    w.restoreFromTempShowTime();
+            });
+        }
+    }
+
+    IpcHandler {
+        target: "time-hold"
+
+        function press() {
+            shellRoot.forEachWindow((w) => {
+                if (w && w.tempShowTime)
+                    w.tempShowTime();
+            });
+        }
+
+        function release() {
+            shellRoot.forEachWindow((w) => {
+                if (w && w.restoreFromTempShowTime)
+                    w.restoreFromTempShowTime();
+            });
+        }
+    }
+
+
+
+
+    IpcHandler {
+        target: "todo"
+        function toggle() {
+            todoVariants.instances.forEach((w) => { if (w) w.toggle(); });
+        }
+    }
+
+    IpcHandler {
+        target: "pomodoro"
+        function toggle() {
+            shellRoot.forEachWindow((w) => { if (w && w.togglePomodoro) w.togglePomodoro(); });
+        }
+    }
+
     Variants {
         id: panelVariants
 
@@ -93,6 +153,17 @@ Scope {
 
             screen: modelData
             shellRootController: shellRoot
+        }
+    }
+
+    Variants {
+        id: todoVariants
+
+        model: Quickshell.screens
+
+        TodoPopup {
+            required property var modelData
+            screen: modelData
         }
     }
 }

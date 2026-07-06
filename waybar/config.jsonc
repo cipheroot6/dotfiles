@@ -10,7 +10,7 @@
 
   // Clock is the ONLY module in center — nothing here can shift it
   "modules-left": ["mpris", "custom/weather", "custom/cava", "custom/active_window"],
-  "modules-center": ["clock#date"],
+  "modules-center": [],
   "modules-right": [
     "custom/screenrecording-indicator",
     "custom/idle-indicator",
@@ -28,7 +28,7 @@
   },
   "group/right1": {
     "orientation": "inherit",
-    "modules": ["network", "battery"],
+    "modules": ["custom/traffic", "custom/vpn", "network", "battery"],
   },
   "group/right2": {
     "orientation": "inherit",
@@ -113,7 +113,22 @@
     ],
   },
 
+  "custom/vpn": {
+    "format": "{}",
+    "interval": 3,
+    "exec": "/home/cipheroot/.config/waybar/vpn.sh",
+    "tooltip": false
+  },
+
+  "custom/traffic": {
+    "exec": "/home/cipheroot/.config/waybar/traffic.py wlan0",
+    "return-type": "json",
+    "format": "{}",
+    "tooltip": true
+  },
+
   "network": {
+    "interface": "wl*",
     "format-wifi": " 󰤨 ",
     "format-ethernet": "󰈀",
     "format-disconnected": "󰤭",

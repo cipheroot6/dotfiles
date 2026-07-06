@@ -63,6 +63,12 @@ Item {
         radius: 28
         color: "#1c1c1e"
         opacity: 0.9
+
+        // Prevent clicks on the panel background from propagating to dismissArea
+        MouseArea {
+            anchors.fill: parent
+            onPressed: (mouse) => { mouse.accepted = true; }
+        }
     }
 
     Item {

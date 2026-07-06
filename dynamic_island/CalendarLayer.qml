@@ -7,6 +7,17 @@ Item {
         id: userConfig
     }
 
+    Timer {
+        id: todayUpdater
+        interval: 60000 // update every minute
+        running: true
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: {
+            calendarPanel.today = new Date();
+        }
+    }
+
     // Emitted on any user interaction so the parent can reset the inactivity timer
     signal userInteracted()
 
@@ -29,11 +40,16 @@ Item {
     // ── Calendar state ────────────────────────────────────────────────────
     property var today: new Date()
 
-    property int viewYear:      today.getFullYear()
-    property int viewMonth:     today.getMonth()        // 0-based
-    property int selectedDay:   today.getDate()
-    property int selectedMonth: today.getMonth()
-    property int selectedYear:  today.getFullYear()
+    property int viewYear:      today ? today.getFullYear() : new Date().getFullYear()
+    property int viewMonth:     today ? today.getMonth() : new Date().getMonth()        // 0-based
+    property int selectedDay:   today ? today.getDate() : new Date().getDate()
+    property int selectedMonth: today ? today.getMonth() : new Date().getMonth()
+    property int selectedYear:  today ? today.getFullYear() : new Date().getFullYear()
+
+    readonly property int prevMonthYear: viewMonth === 0 ? viewYear - 1 : viewYear
+    readonly property int prevMonthMonth: viewMonth === 0 ? 11 : viewMonth - 1
+    readonly property int nextMonthYear: viewMonth === 11 ? viewYear + 1 : viewYear
+    readonly property int nextMonthMonth: viewMonth === 11 ? 0 : viewMonth + 1
 
     readonly property var monthNames: [
         "January","February","March","April","May","June",
@@ -43,16 +59,17 @@ Item {
 
     // ── Helpers ───────────────────────────────────────────────────────────
     function daysInMonth(yr, mo) {
-        return new Date(yr, mo + 1, 0).getDate();
+        return new Date(yr, mo + 1, 0, 12, 0, 0).getDate();
     }
 
+    // Returns 0 = Sunday, 1 = Monday, etc. at 12:00 PM (noon) to avoid DST offsets
     function firstWeekday(yr, mo) {
-        return new Date(yr, mo, 1).getDay();   // 0 = Sunday
+        return new Date(yr, mo, 1, 12, 0, 0).getDay();
     }
 
     function isTodayCell(d) {
         let t = today;
-        return d === t.getDate() && viewMonth === t.getMonth() && viewYear === t.getFullYear();
+        return t && d === t.getDate() && viewMonth === t.getMonth() && viewYear === t.getFullYear();
     }
 
     function isSelectedCell(d) {
@@ -60,22 +77,30 @@ Item {
     }
 
     function prevMonth() {
-        if (viewMonth === 0) { viewMonth = 11; viewYear -= 1; }
-        else                 { viewMonth -= 1; }
+        if (viewMonth === 0) {
+            viewMonth = 11;
+            viewYear -= 1;
+        } else {
+            viewMonth -= 1;
+        }
     }
 
     function nextMonth() {
-        if (viewMonth === 11) { viewMonth = 0; viewYear += 1; }
-        else                  { viewMonth += 1; }
+        if (viewMonth === 11) {
+            viewMonth = 0;
+            viewYear += 1;
+        } else {
+            viewMonth += 1;
+        }
     }
 
     function goToday() {
-        let t = new Date();
-        viewYear  = t.getFullYear();
-        viewMonth = t.getMonth();
-        selectedDay   = t.getDate();
-        selectedMonth = t.getMonth();
-        selectedYear  = t.getFullYear();
+        today = new Date();
+        viewYear  = today.getFullYear();
+        viewMonth = today.getMonth();
+        selectedDay   = today.getDate();
+        selectedMonth = today.getMonth();
+        selectedYear  = today.getFullYear();
     }
 
     // ── Root background card ──────────────────────────────────────────────
@@ -85,6 +110,12 @@ Item {
         anchors.fill: parent
         radius: 28
         color: panelBg
+
+        // Prevent clicks on the panel background from propagating to dismissArea
+        MouseArea {
+            anchors.fill: parent
+            onPressed: (mouse) => { mouse.accepted = true; }
+        }
 
         // Inner highlight ring
         Rectangle {
@@ -260,46 +291,36 @@ Item {
                 property int firstDay: calendarPanel.firstWeekday(viewYear, viewMonth)
                 property int numDays:  calendarPanel.daysInMonth(viewYear, viewMonth)
 
-                // Previous month's trailing days (greyed out, non-interactive)
                 Repeater {
-                    model: dayGrid.firstDay
-
-                    Item {
-                        width: dayGrid.width / 7
-                        height: width
-
-                        property int prevMoDays: calendarPanel.daysInMonth(
-                            viewMonth === 0 ? viewYear - 1 : viewYear,
-                            viewMonth === 0 ? 11 : viewMonth - 1
-                        )
-                        property int displayDay: prevMoDays - (dayGrid.firstDay - 1 - index)
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: parent.displayDay
-                            color: "#2effffff"
-                            font.pixelSize: 13
-                            font.family: textFontFamily
-                        }
-                    }
-                }
-
-                // Current month's days
-                Repeater {
-                    model: dayGrid.numDays
+                    model: 42
 
                     Item {
                         id: dayCell
-                        property int dayNum:  index + 1
-                        property int weekCol: (dayGrid.firstDay + index) % 7
-                        property bool isToday:    calendarPanel.isTodayCell(dayNum)
-                        property bool isSelected: calendarPanel.isSelectedCell(dayNum)
-                        property bool hovered:    cellMouse.containsMouse
-
                         width: dayGrid.width / 7
                         height: width
 
-                        // Background circle
+                        readonly property string cellType: {
+                            if (index < dayGrid.firstDay) return "prev";
+                            if (index < dayGrid.firstDay + dayGrid.numDays) return "curr";
+                            return "next";
+                        }
+
+                        readonly property int dayNum: {
+                            if (cellType === "prev") {
+                                let prevMoDays = calendarPanel.daysInMonth(prevMonthYear, prevMonthMonth);
+                                return prevMoDays - (dayGrid.firstDay - 1 - index);
+                            }
+                            if (cellType === "curr") {
+                                return index - dayGrid.firstDay + 1;
+                            }
+                            return index - (dayGrid.firstDay + dayGrid.numDays) + 1;
+                        }
+
+                        readonly property int weekCol: index % 7
+                        readonly property bool isToday: cellType === "curr" && calendarPanel.isTodayCell(dayNum)
+                        readonly property bool isSelected: cellType === "curr" && calendarPanel.isSelectedCell(dayNum)
+                        readonly property bool hovered: cellType === "curr" && cellMouse.containsMouse
+
                         Rectangle {
                             id: dayBg
                             anchors.centerIn: parent
@@ -308,15 +329,15 @@ Item {
                             radius: width / 2
 
                             color: {
-                                if (isToday)    return cardAccent;
+                                if (cellType !== "curr") return "transparent";
+                                if (isToday) return cardAccent;
                                 if (isSelected) return moduleHover;
-                                if (hovered)    return "#18ffffff";
+                                if (hovered) return "#18ffffff";
                                 return "transparent";
                             }
 
                             Behavior on color { ColorAnimation { duration: 110 } }
 
-                            // Selection ring (shown when selected but not today)
                             Rectangle {
                                 anchors.fill: parent
                                 radius: parent.radius
@@ -331,6 +352,7 @@ Item {
                             anchors.centerIn: parent
                             text: dayNum
                             color: {
+                                if (cellType !== "curr") return "#2effffff";
                                 if (isToday) return "#ffffff";
                                 if (weekCol === 0) return sundayColor;
                                 if (weekCol === 6) return saturdayColor;
@@ -345,6 +367,7 @@ Item {
                         MouseArea {
                             id: cellMouse
                             anchors.fill: parent
+                            enabled: cellType === "curr"
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
@@ -353,28 +376,6 @@ Item {
                                 calendarPanel.selectedYear  = viewYear;
                                 calendarPanel.userInteracted();
                             }
-                        }
-                    }
-                }
-
-                // Next month's leading days (greyed out, non-interactive)
-                Repeater {
-                    model: {
-                        let filled = dayGrid.firstDay + dayGrid.numDays;
-                        let rem = filled % 7;
-                        return rem === 0 ? 0 : 7 - rem;
-                    }
-
-                    Item {
-                        width: dayGrid.width / 7
-                        height: width
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: index + 1
-                            color: "#2effffff"
-                            font.pixelSize: 13
-                            font.family: textFontFamily
                         }
                     }
                 }
@@ -396,7 +397,7 @@ Item {
 
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
-                            text: ""    // calendar icon via Nerd Font
+                            text: "󰃭"    // calendar icon via Nerd Font
                             color: cardAccent
                             font.pixelSize: 12
                             font.family: userConfig.iconFontFamily

@@ -169,7 +169,9 @@ tooltip label {
 
 /* Right group */
 
-#network {
+#network,
+#custom-vpn,
+#custom-traffic {
   color: #cba6f7;
   padding: 0 6px;
 }
