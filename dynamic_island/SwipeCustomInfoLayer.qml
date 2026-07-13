@@ -36,6 +36,18 @@ Item {
     property int batteryInnerRadius: 3
     property real iconVerticalOffset: 1
 
+    property bool hovered: false
+    property real cpuUsage: 0
+    property real cpuTemp: 0
+    property string cpuFreq: "0.00 GHz"
+    property string cpuProcesses: "0/0"
+    property real ramUsage: 0
+    property real ramTotalGB: 0
+    property real ramUsedGB: 0
+    property real diskUsage: 0
+    property real diskTotalGB: 0
+    property real diskUsedGB: 0
+
     readonly property real clampedProgress: Math.max(0, Math.min(1, -transitionProgress))
     readonly property real textWidth: Math.max(0, width - horizontalPadding * 2)
     readonly property real centeredTimeX: horizontalPadding
@@ -68,8 +80,15 @@ Item {
         x: itemsX
         height: parent.height
         anchors.verticalCenter: parent.verticalCenter
-        opacity: clampedProgress
+        opacity: clampedProgress * (root.hovered ? 0 : 1)
         spacing: groupSpacing
+
+        Behavior on opacity {
+            NumberAnimation {
+                duration: 150
+                easing.type: Easing.InOutQuad
+            }
+        }
 
         Repeater {
             model: root.items
@@ -190,7 +209,7 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         text: timeText
         color: "white"
-        opacity: 1 - clampedProgress
+        opacity: (1 - clampedProgress) * (root.hovered ? 0 : 1)
         font.pixelSize: root.textPixelSize + 1
         font.family: timeFontFamily
         font.weight: Font.Bold
@@ -200,5 +219,256 @@ Item {
             : Text.AlignHCenter
         elide: Text.ElideRight
         wrapMode: Text.NoWrap
+
+        Behavior on opacity {
+            NumberAnimation {
+                duration: 150
+                easing.type: Easing.InOutQuad
+            }
+        }
+    }
+
+    Grid {
+        id: detailedGrid
+        anchors.centerIn: parent
+        columns: 2
+        spacing: 20
+        opacity: root.hovered ? 1 : 0
+        visible: opacity > 0
+
+        Behavior on opacity {
+            NumberAnimation {
+                duration: 200
+                easing.type: Easing.InOutQuad
+            }
+        }
+
+        // CPU Usage Cell
+        Item {
+            width: 140
+            height: 48
+
+            Row {
+                id: cpuRow
+                spacing: 8
+                anchors.top: parent.top
+                anchors.left: parent.left
+
+                Text {
+                    text: userConfig.statusIcons["cpu"]
+                    font.family: root.iconFontFamily
+                    font.pixelSize: 16
+                    color: "#3498db" // Modern Blue
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Column {
+                    spacing: 2
+                    Text {
+                        text: "CPU: " + Math.round(root.cpuUsage * 100) + "%"
+                        font.family: root.textFontFamily
+                        font.pixelSize: 12
+                        font.weight: Font.Bold
+                        color: "white"
+                    }
+                    Text {
+                        text: "Freq: " + root.cpuFreq
+                        font.family: root.textFontFamily
+                        font.pixelSize: 9
+                        color: "#a0a0a0"
+                    }
+                }
+            }
+
+            Rectangle {
+                width: parent.width
+                height: 4
+                radius: 2
+                color: Qt.rgba(255, 255, 255, 0.1)
+                anchors.bottom: parent.bottom
+
+                Rectangle {
+                    width: parent.width * root.cpuUsage
+                    height: parent.height
+                    radius: 2
+                    color: "#3498db"
+
+                    Behavior on width {
+                        NumberAnimation { duration: 250; easing.type: Easing.OutQuad }
+                    }
+                }
+            }
+        }
+
+        // RAM Usage Cell
+        Item {
+            width: 140
+            height: 48
+
+            Row {
+                id: ramRow
+                spacing: 8
+                anchors.top: parent.top
+                anchors.left: parent.left
+
+                Text {
+                    text: userConfig.statusIcons["ram"]
+                    font.family: root.iconFontFamily
+                    font.pixelSize: 16
+                    color: "#9b59b6" // Modern Purple
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Column {
+                    spacing: 2
+                    Text {
+                        text: "RAM: " + Math.round(root.ramUsage * 100) + "%"
+                        font.family: root.textFontFamily
+                        font.pixelSize: 12
+                        font.weight: Font.Bold
+                        color: "white"
+                    }
+                    Text {
+                        text: root.ramUsedGB.toFixed(1) + " / " + root.ramTotalGB.toFixed(1) + " GB"
+                        font.family: root.textFontFamily
+                        font.pixelSize: 9
+                        color: "#a0a0a0"
+                    }
+                }
+            }
+
+            Rectangle {
+                width: parent.width
+                height: 4
+                radius: 2
+                color: Qt.rgba(255, 255, 255, 0.1)
+                anchors.bottom: parent.bottom
+
+                Rectangle {
+                    width: parent.width * root.ramUsage
+                    height: parent.height
+                    radius: 2
+                    color: "#9b59b6"
+
+                    Behavior on width {
+                        NumberAnimation { duration: 250; easing.type: Easing.OutQuad }
+                    }
+                }
+            }
+        }
+
+        // Disk Usage Cell
+        Item {
+            width: 140
+            height: 48
+
+            Row {
+                id: diskRow
+                spacing: 8
+                anchors.top: parent.top
+                anchors.left: parent.left
+
+                Text {
+                    text: userConfig.statusIcons["disk"]
+                    font.family: root.iconFontFamily
+                    font.pixelSize: 16
+                    color: "#f1c40f" // Modern Yellow
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Column {
+                    spacing: 2
+                    Text {
+                        text: "Disk: " + Math.round(root.diskUsage * 100) + "%"
+                        font.family: root.textFontFamily
+                        font.pixelSize: 12
+                        font.weight: Font.Bold
+                        color: "white"
+                    }
+                    Text {
+                        text: (root.diskTotalGB - root.diskUsedGB).toFixed(0) + " GB free of " + root.diskTotalGB.toFixed(0) + " GB"
+                        font.family: root.textFontFamily
+                        font.pixelSize: 9
+                        color: "#a0a0a0"
+                    }
+                }
+            }
+
+            Rectangle {
+                width: parent.width
+                height: 4
+                radius: 2
+                color: Qt.rgba(255, 255, 255, 0.1)
+                anchors.bottom: parent.bottom
+
+                Rectangle {
+                    width: parent.width * root.diskUsage
+                    height: parent.height
+                    radius: 2
+                    color: "#f1c40f"
+
+                    Behavior on width {
+                        NumberAnimation { duration: 250; easing.type: Easing.OutQuad }
+                    }
+                }
+            }
+        }
+
+        // Temp Cell
+        Item {
+            width: 140
+            height: 48
+
+            Row {
+                id: tempRow
+                spacing: 8
+                anchors.top: parent.top
+                anchors.left: parent.left
+
+                Text {
+                    text: userConfig.statusIcons["temp"]
+                    font.family: root.iconFontFamily
+                    font.pixelSize: 16
+                    color: "#e74c3c" // Modern Red
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Column {
+                    spacing: 2
+                    Text {
+                        text: root.cpuTemp > 0 ? "Temp: " + Math.round(root.cpuTemp) + "°C" : "Temp: N/A"
+                        font.family: root.textFontFamily
+                        font.pixelSize: 12
+                        font.weight: Font.Bold
+                        color: "white"
+                    }
+                    Text {
+                        text: "Proc: " + root.cpuProcesses
+                        font.family: root.textFontFamily
+                        font.pixelSize: 9
+                        color: "#a0a0a0"
+                    }
+                }
+            }
+
+            Rectangle {
+                width: parent.width
+                height: 4
+                radius: 2
+                color: Qt.rgba(255, 255, 255, 0.1)
+                anchors.bottom: parent.bottom
+
+                Rectangle {
+                    width: parent.width * Math.min(1.0, Math.max(0, root.cpuTemp / 100.0))
+                    height: parent.height
+                    radius: 2
+                    color: "#e74c3c"
+
+                    Behavior on width {
+                        NumberAnimation { duration: 250; easing.type: Easing.OutQuad }
+                    }
+                }
+            }
+        }
     }
 }

@@ -37,9 +37,16 @@ QtObject {
     property string dynamicIslandPrimaryAction: "toggleExpandedPlayer"
     property int dynamicIslandSecondaryButton: 3
     property string dynamicIslandSecondaryAction: "toggleControlCenter"
-    // Supported built-in left swipe items:
-    // "time", "date", "battery", "volume", "brightness", "workspace","cpu", "ram", "cava"
-    property var dynamicIslandLeftSwipeItems: (["cava", "battery"])
+    property int dynamicIslandMiddleButton: 2
+    property string dynamicIslandMiddleAction: "toggleAiPrompt"
+    // "time", "date", "battery", "volume", "brightness", "workspace","cpu", "ram", "cava", "disk", "temp"
+    property var dynamicIslandLeftSwipeItems: (["cpu", "ram", "disk", "temp"])
+    
+    // AI Prompt Config
+    property string ollamaEndpoint: "https://ollama.com/api/chat"
+    property string ollamaModel: "minimax-m3-cloud"
+    property string ollamaApiKey: "920b6f20e7a84615a5267f9f52846181.JLm6VQoXMlIz6jB6gU99tm_n"
+
     property var scriptPaths: ({
         "button_1": "/home/cipheroot/.local/bin/quickshell_script/wifi-menu.sh",
         "button_2": "/home/cipheroot/.local/bin/quickshell_script/bluetooth-menu.sh",
@@ -47,11 +54,11 @@ QtObject {
         "button_4": "/home/cipheroot/.local/bin/quickshell_script/powermenu"
     })
     property var controlCenterActions: ([{
-        "icon": "󰤨",
-        "command": scriptPaths.button_1
+        "icon": "󰅍",
+        "command": "__clipboard__"
     }, {
-        "icon": "󰂯",
-        "command": scriptPaths.button_2
+        "icon": "󰓃",
+        "command": "__volume_mixer__"
     }, {
         "icon": "󰄬",
         "command": "__todo__"
@@ -74,8 +81,10 @@ QtObject {
         "brightnessHigh": "󰃠",
         "charging": "",
         "discharging": "",
-        "cpu": "󰍛",
-        "ram": "󰘚",
+        "cpu": "󰻠",
+        "ram": "",
+        "disk": "󰋊",
+        "temp": "",
         "capsLockOn": "",
         "capsLockOff": "",
         "bluetooth": "󰋋"

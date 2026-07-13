@@ -3,6 +3,9 @@ import Quickshell.Services.Mpris
 
 Item {
     signal controlPressed()
+    signal cyclePlayerRequested()
+
+    property string activePlayerName: ""
 
     UserConfig {
         id: userConfig
@@ -85,11 +88,17 @@ Item {
                 spacing: 16
 
                 Rectangle {
+                    id: albumArtRect
                     width: 60
                     height: 60
                     radius: 14
                     color: "#2c2c2e"
                     clip: true
+                    scale: albumArtMouseArea.pressed ? 0.92 : (albumArtMouseArea.containsMouse ? 1.05 : 1.0)
+
+                    Behavior on scale {
+                        NumberAnimation { duration: 100 }
+                    }
 
                     Image {
                         anchors.fill: parent
@@ -98,11 +107,48 @@ Item {
                         visible: source.toString() !== ""
                         sourceSize: Qt.size(120, 120)
                     }
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: "#88000000"
+                        opacity: albumArtMouseArea.containsMouse ? 1 : 0
+
+                        Behavior on opacity {
+                            NumberAnimation { duration: 150 }
+                        }
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "󰑐"
+                            color: "white"
+                            font.pixelSize: 22
+                            font.family: iconFontFamily
+                        }
+                    }
+
+                    MouseArea {
+                        id: albumArtMouseArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: {
+                            cyclePlayerRequested();
+                        }
+                    }
                 }
 
                 Column {
                     anchors.verticalCenter: parent.verticalCenter
-                    spacing: 4
+                    spacing: 2
+
+                    Text {
+                        text: activePlayerName.toUpperCase()
+                        color: "#b56cff"
+                        font.pixelSize: 10
+                        font.family: textFontFamily
+                        font.weight: Font.Bold
+                        font.letterSpacing: 1.0
+                        visible: activePlayerName !== ""
+                    }
 
                     Text {
                         text: currentTrack

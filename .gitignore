@@ -1,1 +1,33 @@
+# Syncthing folder
 **/.stfolder
+**/.omo/
+
+# Python caching & byte-code
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Log files
+*.log
+**/*.log
+
+# Backup and original files
+*.bak
+*.orig
+*.patched
+**/*.bak
+**/*.orig
+**/*.patched
+
+# C++ Build & compiled artifacts
+**/build/
+*.so
+*.o
+*.a
+*.la
+*.lai
+*.lo
+
+# OS/System files
+.DS_Store
+Thumbs.db

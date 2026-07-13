@@ -602,7 +602,7 @@ Item {
                         height: visible ? 52 : 0
                         radius: 14
                         color: "transparent"
-                        visible: root.wifiEntryVisible(connected)
+                        visible: root.wifiEntryVisible(modelData.connected)
                         clip: true
 
                         MouseArea {
@@ -614,13 +614,7 @@ Item {
                                 && !root.provider.wifiBusy
                             onClicked: {
                                 if (!root.provider) return;
-                                root.provider.connectWifiNetwork({
-                                    ssid: ssid,
-                                    type: type,
-                                    secure: secure,
-                                    savedConnection: savedConnection,
-                                    connected: connected
-                                });
+                                root.provider.connectWifiNetwork(modelData);
                             }
                         }
 
@@ -632,7 +626,7 @@ Item {
                                 anchors.left: parent.left
                                 anchors.verticalCenter: parent.verticalCenter
                                 text: root.provider ? root.provider.wifiGlyph : ""
-                                color: connected ? "#0a84ff" : "#868991"
+                                color: modelData.connected ? "#0a84ff" : "#868991"
                                 font.pixelSize: 14
                                 font.family: root.iconFontFamily
                             }
@@ -643,7 +637,7 @@ Item {
                                 anchors.top: parent.top
                                 anchors.right: rightInfo.left
                                 anchors.rightMargin: 8
-                                text: displayName
+                                text: modelData.name
                                 color: "#f5f5f7"
                                 font.pixelSize: 12
                                 font.family: root.textFontFamily
@@ -657,7 +651,7 @@ Item {
                                 anchors.bottom: parent.bottom
                                 anchors.right: rightInfo.left
                                 anchors.rightMargin: 8
-                                text: secure ? "Secure network" : "Open network"
+                                text: modelData.security !== 0 ? "Secure network" : "Open network"
                                 color: "#9b9da4"
                                 font.pixelSize: 10
                                 font.family: root.textFontFamily
@@ -671,11 +665,11 @@ Item {
                                 spacing: 6
 
                                 Text {
-                                    text: signal + "%"
+                                    text: Math.round(modelData.signalStrength) + "%"
                                     color: "#f0f0f3"
                                     font.pixelSize: 11
                                     font.family: root.textFontFamily
-                                    visible: signal >= 0
+                                    visible: modelData.signalStrength >= 0
                                 }
 
                                 Text {
@@ -683,7 +677,7 @@ Item {
                                     color: "#8f9198"
                                     font.pixelSize: 11
                                     font.family: root.iconFontFamily
-                                    visible: secure
+                                    visible: modelData.security !== 0
                                 }
                             }
                         }

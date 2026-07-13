@@ -100,7 +100,7 @@ PanelWindow {
     readonly property string textFontFamily: userConfig.textFontFamily
     readonly property string heroFontFamily: userConfig.heroFontFamily
     readonly property string timeFontFamily: userConfig.timeFontFamily
-    readonly property int dynamicIslandAcceptedButtons: userConfig.mouseButtonsMask([userConfig.dynamicIslandSwipeButton, userConfig.dynamicIslandPrimaryButton, userConfig.dynamicIslandSecondaryButton])
+    readonly property int dynamicIslandAcceptedButtons: userConfig.mouseButtonsMask([userConfig.dynamicIslandSwipeButton, userConfig.dynamicIslandPrimaryButton, userConfig.dynamicIslandSecondaryButton, userConfig.dynamicIslandMiddleButton])
     readonly property real overviewWallpaperScale: 0.18
     readonly property real overviewWallpaperCacheScaleMultiplier: 1.75
     readonly property int overviewWallpaperTargetWidth: {
@@ -126,6 +126,8 @@ PanelWindow {
     property bool bluetoothConnectivityDetailMounted: false
     property bool calendarOpen: false
     property bool calendarMounted: false
+    property bool aiPromptOpen: false
+    property bool aiPromptMounted: false
     property bool stopwatchMounted: false
     property bool timerMounted: false
     property bool pomodoroIsOnBreak: false
@@ -145,6 +147,17 @@ PanelWindow {
             pomodoroLoader.item.toggle();
 
     }
+
+
+
+    function toggleClipboard() {
+        islandContainer.handleConfiguredClickAction("toggleClipboard");
+    }
+
+    function toggleVolumeMixer() {
+        islandContainer.handleConfiguredClickAction("toggleVolumeMixer");
+    }
+
 
     function closeControlCenter() {
         if (islandContainer.islandState === "control_center")
@@ -280,6 +293,28 @@ PanelWindow {
             setCalendarVisible(true);
     }
 
+    function setAiPromptVisible(open) {
+        const nextOpen = !!open;
+        if (nextOpen) {
+            aiPromptCleanupTimer.stop();
+            aiPromptMounted = true;
+            aiPromptOpen = true;
+        } else {
+            if (!aiPromptMounted && !aiPromptOpen)
+                return ;
+
+            aiPromptOpen = false;
+            aiPromptCleanupTimer.restart();
+        }
+    }
+
+    function toggleAiPrompt() {
+        if (aiPromptOpen)
+            setAiPromptVisible(false);
+        else
+            setAiPromptVisible(true);
+    }
+
     function collapseAll() {
         if (islandContainer)
             islandContainer.restoreRestingCapsule(false);
@@ -396,14 +431,38 @@ PanelWindow {
     anchors.left: true
     anchors.right: true
     anchors.bottom: root.anyPopupOpen
-    implicitHeight: root.overviewVisible ? Math.max(Math.ceil(4 + root.connectivityDetailHeight + 12), Math.ceil(4 + root.overviewCapsuleHeight + 8)) : Math.max(Math.ceil(4 + root.connectivityDetailHeight + 12), root.calendarMounted ? Math.ceil(4 + 38 + 8 + root.calendarPanelHeight + 8) : 0)
+    implicitHeight: {
+        if (root.overviewVisible) {
+            return Math.max(Math.ceil(4 + root.connectivityDetailHeight + 12), Math.ceil(4 + root.overviewCapsuleHeight + 8));
+        }
+        
+        let height = Math.max(Math.ceil(4 + root.connectivityDetailHeight + 12), 0);
+        
+        if (root.calendarMounted) {
+            height = Math.max(height, Math.ceil(4 + 38 + 8 + root.calendarPanelHeight + 8));
+        }
+        if (root.aiPromptMounted) {
+            height = Math.max(height, Math.ceil(4 + 38 + 8 + 340 + 8));
+        }
+        
+        return height;
+    }
     exclusiveZone: -1
     aboveWindows: true
-    focusable: root.monitorFocused && (root.overviewVisible || root.connectivityPromptActive)
+    focusable: root.monitorFocused && (root.overviewVisible || root.connectivityPromptActive || root.aiPromptOpen)
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: {
-        const needsKeys = root.monitorFocused && (root.overviewVisible || root.connectivityPromptActive || (islandContainer.islandState === "timer" && timerLoader.item && timerLoader.item.inputMode));
+        const needsKeys = root.monitorFocused && (root.overviewVisible || root.connectivityPromptActive || root.aiPromptOpen || (islandContainer && islandContainer.islandState === "timer" && timerLoader.item && timerLoader.item.inputMode));
         return needsKeys ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None;
+    }
+    WlrLayershell.onKeyboardFocusChanged: {
+        console.log("DynamicIslandWindow: keyboardFocus changed to", WlrLayershell.keyboardFocus, "on monitor", screen.name, "monitorFocused=", root.monitorFocused, "aiPromptOpen=", root.aiPromptOpen);
+    }
+
+    HyprlandFocusGrab {
+        id: aiPromptFocusGrab
+        windows: [ root ]
+        active: root.aiPromptOpen && root.monitorFocused
     }
     onOverviewVisibleChanged: {
         if (overviewVisible && monitorFocused)
@@ -514,6 +573,14 @@ PanelWindow {
     }
 
     Timer {
+        id: aiPromptCleanupTimer
+
+        interval: 180
+        repeat: false
+        onTriggered: root.aiPromptMounted = false
+    }
+
+    Timer {
         id: overviewWallpaperCacheKeepAliveTimer
 
         interval: 3000
@@ -598,6 +665,24 @@ PanelWindow {
         property real currentBrightness: -1
         property real currentCpuUsage: -1
         property real currentRamUsage: -1
+        property real currentDiskUsage: -1
+        property real currentCpuTemp: -1
+        property real currentRamTotalGB: 0
+        property real currentRamUsedGB: 0
+        property real currentDiskTotalGB: 0
+        property real currentDiskUsedGB: 0
+        property string currentCpuFreq: "0.00 GHz"
+        property string currentCpuProcesses: "0/0"
+        readonly property bool customStatsHovered: islandState === "custom" && capsuleHoverHandler.hovered
+        onCustomStatsHoveredChanged: {
+            if (customStatsHovered) {
+                autoHideTimer.stop();
+            } else {
+                if (islandState === "custom") {
+                    restartAutoHideTimer(10000);
+                }
+            }
+        }
         property string notificationAppName: ""
         property string notificationSummary: ""
         property string notificationBody: ""
@@ -631,7 +716,7 @@ PanelWindow {
         readonly property bool canShowSideSwipe: islandState === "normal" || islandState === "custom" || islandState === "lyrics" || (islandState === "long_capsule" && workspaceOriginSide === "none")
         readonly property real rightSwipeProgress: Math.max(0, swipeTransitionProgress)
         readonly property var configuredLeftSwipeIds: buildNormalizedSwipeItemIds(userConfig.dynamicIslandLeftSwipeItems)
-        readonly property bool usesSystemStatsModule: configuredLeftSwipeIds.indexOf("cpu") !== -1 || configuredLeftSwipeIds.indexOf("ram") !== -1
+        readonly property bool usesSystemStatsModule: configuredLeftSwipeIds.indexOf("cpu") !== -1 || configuredLeftSwipeIds.indexOf("ram") !== -1 || configuredLeftSwipeIds.indexOf("disk") !== -1 || configuredLeftSwipeIds.indexOf("temp") !== -1
         readonly property bool usesCavaModule: configuredLeftSwipeIds.indexOf("cava") !== -1
         readonly property var customLeftItems: buildCustomSwipeItems(userConfig.dynamicIslandLeftSwipeItems)
         readonly property bool hasCustomLeftItems: customLeftItems.length > 0
@@ -640,11 +725,32 @@ PanelWindow {
         readonly property bool expandedLayerVisible: !root.overviewVisible && islandState === "expanded"
         readonly property bool notificationLayerVisible: !root.overviewVisible && islandState === "notification"
         readonly property bool controlCenterLayerVisible: !root.overviewVisible && islandState === "control_center"
+        readonly property bool clipboardLayerVisible: !root.overviewVisible && islandState === "clipboard"
+        readonly property bool volumeMixerLayerVisible: !root.overviewVisible && islandState === "volume_mixer"
         readonly property string lyricsDisplayText: lyricsBridge.displayText
         readonly property var overviewView: overviewLoader.item && overviewLoader.item.overviewView ? overviewLoader.item.overviewView : null
         property string lastActivePlayerDbusName: ""
         property var playersList: Mpris.players.values !== undefined ? Mpris.players.values : Mpris.players
         property var activePlayer: null
+        property bool userSelectedPlayer: false
+        property string manuallySelectedPlayerDbusName: ""
+        property string activePlayerName: {
+            if (!activePlayer)
+                return "";
+
+            if (activePlayer.identity)
+                return activePlayer.identity;
+
+            if (activePlayer.dbusName) {
+                const parts = activePlayer.dbusName.split('.');
+                const last = parts[parts.length - 1];
+                if (last.startsWith("MediaPlayer2."))
+                    return last.replace("MediaPlayer2.", "");
+
+                return last;
+            }
+            return "Player";
+        }
         property string lyricsLookupTitle: activePlayer ? (activePlayer.trackTitle || activePlayer.title || "") : ""
         property string lyricsLookupArtist: {
             if (!activePlayer)
@@ -721,6 +827,45 @@ PanelWindow {
                 if (islandState === "control_center")
                     smartRestoreState();
 
+                return ;
+            case "toggleAiPrompt":
+                if (islandState === "aiprompt")
+                    smartRestoreState();
+                else
+                    showAiPrompt();
+                return ;
+            case "openAiPrompt":
+                showAiPrompt();
+                return ;
+            case "closeAiPrompt":
+                if (islandState === "aiprompt")
+                    smartRestoreState();
+                return ;
+            case "toggleClipboard":
+                if (islandState === "clipboard")
+                    smartRestoreState();
+                else
+                    showClipboard();
+                return ;
+            case "openClipboard":
+                showClipboard();
+                return ;
+            case "closeClipboard":
+                if (islandState === "clipboard")
+                    smartRestoreState();
+                return ;
+            case "toggleVolumeMixer":
+                if (islandState === "volume_mixer")
+                    smartRestoreState();
+                else
+                    showVolumeMixer();
+                return ;
+            case "openVolumeMixer":
+                showVolumeMixer();
+                return ;
+            case "closeVolumeMixer":
+                if (islandState === "volume_mixer")
+                    smartRestoreState();
                 return ;
             case "toggleOverview":
                 root.toggleOverviewEverywhere();
@@ -839,9 +984,29 @@ PanelWindow {
                 if (parts[0] === "mem" && parts.length >= 3) {
                     const totalMem = Number(parts[1]) || 0;
                     const availableMem = Number(parts[2]) || 0;
-                    if (totalMem > 0)
+                    if (totalMem > 0) {
                         currentRamUsage = clamp01((totalMem - availableMem) / totalMem);
-
+                        currentRamTotalGB = totalMem / 1024 / 1024;
+                        currentRamUsedGB = (totalMem - availableMem) / 1024 / 1024;
+                    }
+                }
+                if (parts[0] === "disk" && parts.length >= 3) {
+                    const totalDisk = Number(parts[1]) || 0;
+                    const availableDisk = Number(parts[2]) || 0;
+                    if (totalDisk > 0) {
+                        currentDiskUsage = clamp01((totalDisk - availableDisk) / totalDisk);
+                        currentDiskTotalGB = totalDisk / 1024 / 1024;
+                        currentDiskUsedGB = (totalDisk - availableDisk) / 1024 / 1024;
+                    }
+                }
+                if (parts[0] === "temp" && parts.length >= 2) {
+                    currentCpuTemp = Number(parts[1]) || 0;
+                }
+                if (parts[0] === "proc" && parts.length >= 2) {
+                    currentCpuProcesses = parts[1];
+                }
+                if (parts[0] === "freq" && parts.length >= 2) {
+                    currentCpuFreq = parts[1] + " GHz";
                 }
             }
         }
@@ -928,6 +1093,24 @@ PanelWindow {
                     "icon": userConfig.statusIcons["ram"],
                     "text": formatPercentText(currentRamUsage)
                 };
+            case "disk":
+                if (currentDiskUsage < 0)
+                    return null;
+
+                return {
+                    "id": itemId,
+                    "icon": userConfig.statusIcons["disk"],
+                    "text": formatPercentText(currentDiskUsage)
+                };
+            case "temp":
+                if (currentCpuTemp < 0)
+                    return null;
+
+                return {
+                    "id": itemId,
+                    "icon": userConfig.statusIcons["temp"],
+                    "text": Math.round(currentCpuTemp) + "°C"
+                };
             case "cava":
                 return {
                     "id": itemId,
@@ -972,7 +1155,7 @@ PanelWindow {
             case "custom":
                 return -1;
             case "lyrics":
-                return 1;
+                return 2;
             default:
                 return 0;
             }
@@ -994,7 +1177,7 @@ PanelWindow {
             case "custom":
                 return -1;
             case "lyrics":
-                return 1;
+                return 2;
             default:
                 return 0;
             }
@@ -1057,7 +1240,7 @@ PanelWindow {
                 return -1;
 
             if (progressValue >= 0.5)
-                return 1;
+                return 2;
 
             return 0;
         }
@@ -1100,7 +1283,8 @@ PanelWindow {
 
         function advanceSideSwipeProgress(currentProgress, deltaX) {
             const minProgress = hasCustomLeftItems ? -1 : 0;
-            let nextProgress = Math.max(minProgress, Math.min(1, currentProgress));
+            const maxProgress = 2;
+            let nextProgress = Math.max(minProgress, Math.min(maxProgress, currentProgress));
             let remainingDelta = deltaX;
             if (remainingDelta > 0) {
                 if (nextProgress < 0) {
@@ -1109,9 +1293,9 @@ PanelWindow {
                     nextProgress += progressToCenter;
                     remainingDelta -= progressToCenter * leftDistance;
                 }
-                if (remainingDelta > 0 && nextProgress < 1) {
+                if (remainingDelta > 0 && nextProgress < maxProgress) {
                     const rightDistance = Math.max(1, sideSwipeDragDistanceForDirection("right"));
-                    nextProgress = Math.min(1, nextProgress + remainingDelta / rightDistance);
+                    nextProgress = Math.min(maxProgress, nextProgress + remainingDelta / rightDistance);
                 }
             } else if (remainingDelta < 0) {
                 if (nextProgress > 0) {
@@ -1125,38 +1309,34 @@ PanelWindow {
                     nextProgress = Math.max(minProgress, nextProgress + remainingDelta / leftDistance);
                 }
             }
-            return Math.max(minProgress, Math.min(1, nextProgress));
+            return Math.max(minProgress, Math.min(maxProgress, nextProgress));
         }
 
         function resolveSideSwipeSettle(startProgress, finalProgress) {
-            let settleAction = "";
-            let settleProgress = sideSwipeRestProgressForProgress(startProgress);
-            let settleWidth = sideSwipeRestWidthForProgress(startProgress);
-            if (finalProgress >= 0.56) {
-                settleAction = "lyrics";
-                settleProgress = 1;
-                settleWidth = lyricsCapsuleWidth;
-            } else if (hasCustomLeftItems && finalProgress <= -0.56) {
+            let settleAction = "time";
+            let settleProgress = 0;
+            let settleWidth = root.normalPillWidth;
+
+            if (hasCustomLeftItems && finalProgress <= -0.44) {
                 settleAction = "custom";
                 settleProgress = -1;
                 settleWidth = customCapsuleWidth;
-            } else if (startProgress <= -0.5) {
-                if (finalProgress >= -0.44) {
-                    settleAction = "time";
-                    settleProgress = 0;
-                    settleWidth = root.normalPillWidth;
-                }
-            } else if (startProgress >= 0.5) {
-                if (finalProgress <= 0.44) {
-                    settleAction = "time";
-                    settleProgress = 0;
-                    settleWidth = root.normalPillWidth;
-                }
-            } else {
+            } else if (finalProgress > -0.44 && finalProgress < 0.44) {
                 settleAction = "time";
                 settleProgress = 0;
                 settleWidth = root.normalPillWidth;
+            } else if (finalProgress >= 0.44) {
+                settleAction = "lyrics";
+                settleProgress = 2;
+                settleWidth = lyricsCapsuleWidth;
+            } else {
+                settleProgress = sideSwipeRestProgressForProgress(startProgress);
+                settleWidth = sideSwipeRestWidthForProgress(startProgress);
+                if (settleProgress === -1) settleAction = "custom";
+                else if (settleProgress === 2) settleAction = "lyrics";
+                else settleAction = "time";
             }
+
             return {
                 "action": settleAction,
                 "progress": settleProgress,
@@ -1295,6 +1475,36 @@ PanelWindow {
             mainCapsule.displayedWidth = mainCapsule.baseTargetWidth;
             root.setCalendarVisible(false);
             restartAutoHideTimer(10000);
+        }
+
+        function showAiPrompt() {
+            cancelSideSwipeSettle();
+            abortSideTransientMode();
+            clearTransientCapsule();
+            islandState = "aiprompt";
+            mainCapsule.displayedWidth = mainCapsule.baseTargetWidth;
+            root.setCalendarVisible(false);
+            stopAutoHideTimer();
+        }
+
+        function showClipboard() {
+            cancelSideSwipeSettle();
+            abortSideTransientMode();
+            clearTransientCapsule();
+            islandState = "clipboard";
+            mainCapsule.displayedWidth = mainCapsule.baseTargetWidth;
+            root.setCalendarVisible(false);
+            stopAutoHideTimer();
+        }
+
+        function showVolumeMixer() {
+            cancelSideSwipeSettle();
+            abortSideTransientMode();
+            clearTransientCapsule();
+            islandState = "volume_mixer";
+            mainCapsule.displayedWidth = mainCapsule.baseTargetWidth;
+            root.setCalendarVisible(false);
+            stopAutoHideTimer();
         }
 
         function showCustomCapsule() {
@@ -1456,6 +1666,14 @@ PanelWindow {
             if (!playersList || playersList.length === 0)
                 return null;
 
+            if (userSelectedPlayer && manuallySelectedPlayerDbusName !== "") {
+                const manual = findPlayerByDbusName(manuallySelectedPlayerDbusName);
+                if (manual)
+                    return manual;
+                else
+                    userSelectedPlayer = false;
+            }
+
             for (let i = 0; i < playersList.length; i++) {
                 if (playersList[i].playbackState === MprisPlaybackState.Playing)
                     return playersList[i];
@@ -1476,6 +1694,30 @@ PanelWindow {
 
             }
             return playersList[0];
+        }
+
+        function cycleActivePlayer() {
+            if (!playersList || playersList.length <= 1)
+                return;
+
+            let currentIndex = -1;
+            const current = activePlayer;
+            if (current) {
+                for (let i = 0; i < playersList.length; i++) {
+                    if (playersList[i].dbusName === current.dbusName) {
+                        currentIndex = i;
+                        break;
+                    }
+                }
+            }
+
+            let nextIndex = (currentIndex + 1) % playersList.length;
+            const next = playersList[nextIndex];
+            if (next) {
+                userSelectedPlayer = true;
+                manuallySelectedPlayerDbusName = next.dbusName;
+                _refreshActivePlayer();
+            }
         }
 
         function _refreshActivePlayer() {
@@ -1764,7 +2006,7 @@ PanelWindow {
         Process {
             id: systemStatsSnapshot
 
-            command: ["sh", "-lc", "awk 'NR == 1 { print \"cpu\", $2, $3, $4, $5, $6, $7, $8, $9, $10 } $1 == \"MemTotal:\" { total = $2 } $1 == \"MemAvailable:\" { available = $2 } END { print \"mem\", total, available }' /proc/stat /proc/meminfo"]
+            command: ["sh", "-lc", "awk 'NR == 1 { print \"cpu\", $2, $3, $4, $5, $6, $7, $8, $9, $10 } $1 == \"MemTotal:\" { total = $2 } $1 == \"MemAvailable:\" { available = $2 } END { print \"mem\", total, available }' /proc/stat /proc/meminfo; df -kP / | awk 'NR==2 {print \"disk\", $2, $4}'; cat /sys/class/hwmon/hwmon6/temp1_input 2>/dev/null | awk '{print \"temp\", $1/1000}'; cat /proc/loadavg | awk '{print \"proc\", $4}'; cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq 2>/dev/null | awk '{sum+=$1; count++} END {if (count > 0) { printf \"freq %.2f\\n\", sum/count/1000000 } else { exit 1 }}' || awk '/cpu MHz/ {sum+=$4; count++} END {if (count > 0) printf \"freq %.2f\\n\", sum/count/1000}' /proc/cpuinfo"]
 
             stdout: StdioCollector {
                 waitForEnd: true
@@ -1776,7 +2018,7 @@ PanelWindow {
         Timer {
             id: systemStatsPollTimer
 
-            interval: 3000
+            interval: islandContainer.customStatsHovered ? 1000 : 3000
             repeat: true
             running: islandContainer.usesSystemStatsModule && customSwipeLoader.active
             triggeredOnStart: true
@@ -2107,6 +2349,9 @@ PanelWindow {
                     if (islandContainer.restingState === "lyrics" && ((islandContainer.islandState === "split" && islandContainer.splitOriginSide === "right") || (islandContainer.islandState === "long_capsule" && islandContainer.workspaceOriginSide === "right")))
                         return islandContainer.lyricsCapsuleWidth;
 
+                    if (islandContainer.restingState === "aiprompt" && ((islandContainer.islandState === "split" && islandContainer.splitOriginSide === "right") || (islandContainer.islandState === "long_capsule" && islandContainer.workspaceOriginSide === "right")))
+                        return 420;
+
                     if (islandContainer.restingState === "custom" && ((islandContainer.islandState === "split" && islandContainer.splitOriginSide === "left") || (islandContainer.islandState === "long_capsule" && islandContainer.workspaceOriginSide === "left")))
                         return islandContainer.customCapsuleWidth;
 
@@ -2117,7 +2362,13 @@ PanelWindow {
                 case "long_capsule":
                     return 220;
                 case "custom":
-                    return islandContainer.customCapsuleWidth;
+                    return islandContainer.customStatsHovered ? 340 : islandContainer.customCapsuleWidth;
+                case "aiprompt":
+                    return 420;
+                case "clipboard":
+                    return 360;
+                case "volume_mixer":
+                    return 360;
                 case "lyrics":
                     return islandContainer.lyricsCapsuleWidth;
                 case "stopwatch":
@@ -2143,6 +2394,8 @@ PanelWindow {
                 if (root.overviewVisible)
                     return root.overviewCapsuleHeight;
 
+
+
                 switch (islandContainer.islandState) {
                 case "control_center":
                     return 390;
@@ -2154,6 +2407,14 @@ PanelWindow {
                     return 114;
                 case "expanded":
                     return 165;
+                case "aiprompt":
+                    return 340;
+                case "clipboard":
+                    return 300;
+                case "volume_mixer":
+                    return 260;
+                case "custom":
+                    return islandContainer.customStatsHovered ? 130 : 38;
                 case "notification":
                     return notificationLoader.item ? Math.max(56, Math.min(68, notificationLoader.item.preferredHeight)) : 56;
                 default:
@@ -2164,11 +2425,21 @@ PanelWindow {
                 if (root.overviewVisible)
                     return root.overviewCapsuleRadius;
 
+
+
                 switch (islandContainer.islandState) {
                 case "control_center":
                     return 34;
                 case "expanded":
                     return 40;
+                case "aiprompt":
+                    return 24;
+                case "clipboard":
+                    return 24;
+                case "volume_mixer":
+                    return 24;
+                case "custom":
+                    return islandContainer.customStatsHovered ? 24 : 19;
                 case "notification":
                     return mainCapsule.targetHeight / 2;
                 default:
@@ -2181,8 +2452,9 @@ PanelWindow {
                 if (progressValue < 0)
                     return root.normalPillWidth + (islandContainer.customCapsuleWidth - root.normalPillWidth) * islandContainer.clamp01(-progressValue);
 
-                if (progressValue > 0)
-                    return root.normalPillWidth + (islandContainer.lyricsCapsuleWidth - root.normalPillWidth) * islandContainer.clamp01(progressValue);
+                if (progressValue > 0) {
+                    return root.normalPillWidth + (islandContainer.lyricsCapsuleWidth - root.normalPillWidth) * (progressValue / 2.0);
+                }
 
                 return root.normalPillWidth;
             }
@@ -2357,6 +2629,10 @@ PanelWindow {
                             islandContainer.userSwipedAwayFromLyrics = true;
                             islandContainer.showCustomCapsule();
                             break;
+                        case "aiprompt":
+                            islandContainer.userSwipedAwayFromLyrics = true;
+                            islandContainer.showAiPrompt();
+                            break;
                         case "lyrics":
                             islandContainer.userSwipedAwayFromLyrics = false;
                             islandContainer.showLyricsCapsule();
@@ -2402,7 +2678,7 @@ PanelWindow {
                                 root.cancelPreparedOverviewEverywhere();
                                 preparedOverviewOnPress = false;
                             }
-                            const blockingStates = ["stopwatch", "timer", "pomodoro"];
+                            const blockingStates = ["stopwatch", "timer", "pomodoro", "aiprompt", "clipboard", "volume_mixer"];
                             if (blockingStates.indexOf(islandContainer.islandState) === -1)
                                 islandContainer.handleConfiguredClickAction(userConfig.dynamicIslandPrimaryAction);
 
@@ -2417,6 +2693,10 @@ PanelWindow {
                     if (mouse.button === userConfig.mouseButton(userConfig.dynamicIslandSecondaryButton)) {
                         preparedOverviewOnPress = false;
                         islandContainer.handleConfiguredClickAction(userConfig.dynamicIslandSecondaryAction);
+                    }
+                    if (mouse.button === userConfig.mouseButton(userConfig.dynamicIslandMiddleButton)) {
+                        preparedOverviewOnPress = false;
+                        islandContainer.handleConfiguredClickAction(userConfig.dynamicIslandMiddleAction);
                     }
                 }
 
@@ -2448,6 +2728,10 @@ PanelWindow {
                             islandContainer.userSwipedAwayFromLyrics = true;
                             islandContainer.showCustomCapsule();
                             break;
+                        case "aiprompt":
+                            islandContainer.userSwipedAwayFromLyrics = true;
+                            islandContainer.showAiPrompt();
+                            break;
                         case "lyrics":
                             islandContainer.userSwipedAwayFromLyrics = false;
                             islandContainer.showLyricsCapsule();
@@ -2469,7 +2753,7 @@ PanelWindow {
                         if (kind === "calendar") {
                             root.toggleCalendar();
                         } else if (kind === "primary") {
-                            const blockingStates = ["stopwatch", "timer", "pomodoro"];
+                            const blockingStates = ["stopwatch", "timer", "pomodoro", "aiprompt", "clipboard", "volume_mixer"];
                             if (blockingStates.indexOf(islandContainer.islandState) === -1)
                                 islandContainer.handleConfiguredClickAction(userConfig.dynamicIslandPrimaryAction);
 
@@ -2506,6 +2790,18 @@ PanelWindow {
                         showSecondaryText: islandContainer.workspaceOriginSide !== "left" && islandContainer.splitOriginSide !== "left"
                         showCondition: true
                         onPreferredWidthChanged: islandContainer.syncCustomCapsuleWidth()
+
+                        hovered: islandContainer.customStatsHovered
+                        cpuUsage: islandContainer.currentCpuUsage
+                        cpuTemp: islandContainer.currentCpuTemp
+                        cpuFreq: islandContainer.currentCpuFreq
+                        cpuProcesses: islandContainer.currentCpuProcesses
+                        ramUsage: islandContainer.currentRamUsage
+                        ramTotalGB: islandContainer.currentRamTotalGB
+                        ramUsedGB: islandContainer.currentRamUsedGB
+                        diskUsage: islandContainer.currentDiskUsage
+                        diskTotalGB: islandContainer.currentDiskTotalGB
+                        diskUsedGB: islandContainer.currentDiskUsedGB
                     }
 
                 }
@@ -2532,7 +2828,7 @@ PanelWindow {
                         textPixelSize: 16
                         minimumWidth: 220
                         maximumWidth: Math.max(220, root.width - 48)
-                        transitionProgress: islandContainer.rightSwipeProgress
+                        transitionProgress: islandContainer.swipeTransitionProgress
                         showSecondaryText: islandContainer.workspaceOriginSide !== "right" && islandContainer.splitOriginSide !== "right"
                         showCondition: true
                         onPreferredWidthChanged: islandContainer.syncLyricsCapsuleWidth()
@@ -2629,6 +2925,7 @@ PanelWindow {
                         timeTotal: islandContainer.timeTotal
                         trackProgress: islandContainer.trackProgress
                         activePlayer: islandContainer.activePlayer
+                        activePlayerName: islandContainer.activePlayerName
                         iconFontFamily: root.iconFontFamily
                         textFontFamily: root.textFontFamily
                         showCondition: islandContainer.expandedLayerVisible
@@ -2637,6 +2934,9 @@ PanelWindow {
                             if (!islandContainer.expandedByPlayerAutoOpen)
                                 islandContainer.restartAutoHideTimer(10000);
 
+                        }
+                        onCyclePlayerRequested: {
+                            islandContainer.cycleActivePlayer();
                         }
                     }
 
@@ -2702,6 +3002,12 @@ PanelWindow {
                                 pomodoroLoader.item.toggle();
 
                         }
+                        onClipboardToggle: function() {
+                            root.toggleClipboard();
+                        }
+                        onVolumeMixerToggle: function() {
+                            root.toggleVolumeMixer();
+                        }
                         onConnectivityPanelRequested: function(kind, open) {
                             root.setConnectivityDetailVisible(kind, open);
                         }
@@ -2709,6 +3015,40 @@ PanelWindow {
 
                 }
 
+            }
+
+
+
+            Loader {
+                id: clipboardLoader
+
+                anchors.fill: parent
+                active: islandContainer.clipboardLayerVisible
+                asynchronous: false
+                visible: active
+
+                sourceComponent: Component {
+                    ClipboardLayer {
+                        showCondition: islandContainer.clipboardLayerVisible
+                        textFontFamily: root.textFontFamily
+                    }
+                }
+            }
+
+            Loader {
+                id: volumeMixerLoader
+
+                anchors.fill: parent
+                active: islandContainer.volumeMixerLayerVisible
+                asynchronous: false
+                visible: active
+
+                sourceComponent: Component {
+                    VolumeMixerLayer {
+                        showCondition: islandContainer.volumeMixerLayerVisible
+                        textFontFamily: root.textFontFamily
+                    }
+                }
             }
 
             Loader {
@@ -3400,6 +3740,86 @@ PanelWindow {
 
         }
 
+        Item {
+            id: aiPromptShell
+
+            readonly property real panelW: 420
+            readonly property real panelH: 340
+            readonly property real shownX: Math.round((root.width - panelW) / 2)
+            readonly property real shownY: mainCapsule.y + mainCapsule.height + 10
+            readonly property real hiddenY: mainCapsule.y + mainCapsule.height - 12
+            property real revealProgress: 0
+
+            x: shownX
+            y: hiddenY + (shownY - hiddenY) * revealProgress
+            width: panelW
+            height: panelH
+            opacity: revealProgress
+            visible: root.aiPromptMounted || opacity > 0.001
+            z: 3
+            Component.onCompleted: revealProgress = root.aiPromptOpen ? 1 : 0
+
+            HoverHandler {
+                id: aiPromptHoverHandler
+            }
+
+            NumberAnimation {
+                id: aiPromptRevealAnimation
+
+                target: aiPromptShell
+                property: "revealProgress"
+            }
+
+            Connections {
+                function onAiPromptOpenChanged() {
+                    aiPromptRevealAnimation.stop();
+                    if (root.aiPromptOpen) {
+                        aiPromptRevealAnimation.to = 1;
+                        aiPromptRevealAnimation.duration = 420;
+                        aiPromptRevealAnimation.easing.type = Easing.OutBack;
+                        aiPromptRevealAnimation.easing.overshoot = 0.45;
+                    } else {
+                        aiPromptRevealAnimation.to = 0;
+                        aiPromptRevealAnimation.duration = 180;
+                        aiPromptRevealAnimation.easing.type = Easing.InCubic;
+                    }
+                    aiPromptRevealAnimation.start();
+                }
+
+                target: root
+            }
+
+            Item {
+                id: aiPromptBody
+
+                anchors.fill: parent
+
+                Loader {
+                    anchors.fill: parent
+                    active: root.aiPromptMounted
+                    asynchronous: false
+                    visible: active
+
+                    sourceComponent: Component {
+                        AiPromptLayer {
+                            textFontFamily: root.textFontFamily
+                            ollamaEndpoint: userConfig.ollamaEndpoint
+                            ollamaModel: userConfig.ollamaModel
+                            ollamaApiKey: userConfig.ollamaApiKey
+                            onCloseRequested: root.setAiPromptVisible(false)
+                        }
+                    }
+                }
+
+                transform: Scale {
+                    origin.x: aiPromptBody.width / 2
+                    origin.y: 0
+                    xScale: aiPromptShell.revealProgress
+                    yScale: aiPromptShell.revealProgress
+                }
+            }
+        }
+
         Connections {
             function onAnyActiveUiHoveredChanged() {
                 if (root.anyActiveUiHovered) {
@@ -3484,6 +3904,20 @@ PanelWindow {
             height: calendarShell.visible ? Math.ceil(calendarShell.height) : 0
         }
 
+        Region {
+            intersection: Intersection.Combine
+            x: Math.floor(aiPromptShell.x)
+            y: Math.floor(aiPromptShell.y)
+            width: aiPromptShell.visible ? Math.ceil(aiPromptShell.width) : 0
+            height: aiPromptShell.visible ? Math.ceil(aiPromptShell.height) : 0
+        }
+
+    }
+
+    Process {
+        id: clipboardDaemon
+        command: ["wl-paste", "--watch", "python3", "/home/cipheroot/.config/quickshell/dynamic_island/bin/append_clip.py"]
+        Component.onCompleted: exec(command)
     }
 
 }

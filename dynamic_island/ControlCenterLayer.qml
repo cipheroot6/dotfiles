@@ -1,7 +1,7 @@
 import QtQuick
 import Quickshell.Bluetooth
 import Quickshell.Io
-import ConnectivityBackend
+import Quickshell.Networking
 
 Item {
     id: controlCenter
@@ -67,9 +67,16 @@ Item {
     property string bluetoothError: ""
     property string bluetoothPairAndConnectPath: ""
     property string bluetoothPendingSecretValue: ""
-    readonly property var wifiController: WifiController
     readonly property var bluetoothPairingAgent: BluetoothPairingAgent
-    readonly property var wifiNetworks: wifiController ? wifiController.networks : null
+    readonly property var wifiDevice: {
+        let values = Networking.devices.values;
+        if (!values) return null;
+        for (let i = 0; i < values.length; ++i) {
+            if (values[i].type === DeviceType.Wifi) return values[i];
+        }
+        return null;
+    }
+    readonly property var wifiNetworks: wifiDevice && wifiDevice.networks ? wifiDevice.networks.values : null
 
     readonly property real sliderKnobSize: 24
     readonly property color panelColor: "#000000"
@@ -90,20 +97,23 @@ Item {
     readonly property bool bluetoothAvailable: !!bluetoothAdapter
     readonly property var bluetoothAdapter: Bluetooth.defaultAdapter
     readonly property var bluetoothDeviceValues: bluetoothAdapter ? bluetoothAdapter.devices.values : []
-    readonly property bool wifiSupported: wifiController ? wifiController.supported : false
-    readonly property bool wifiReadOnly: wifiController ? wifiController.readOnly : true
-    readonly property bool wifiAvailable: wifiController ? wifiController.available : false
-    readonly property bool wifiEnabled: wifiController ? wifiController.enabled : false
-    readonly property bool wifiBusy: wifiController ? wifiController.busy : false
-    readonly property bool wifiListRunning: wifiController ? wifiController.scanning : false
-    readonly property string wifiCurrentSsid: wifiController ? wifiController.currentSsid : ""
-    readonly property string wifiInfoMessage: wifiLocalInfoMessage.length > 0
-        ? wifiLocalInfoMessage
-        : (wifiController ? wifiController.infoMessage : "")
-    readonly property string wifiError: wifiLocalError.length > 0
-        ? wifiLocalError
-        : (wifiController ? wifiController.errorMessage : "")
-    readonly property string wifiUnsupportedReason: wifiController ? wifiController.unsupportedReason : ""
+    readonly property bool wifiSupported: true
+    readonly property bool wifiReadOnly: false
+    readonly property bool wifiAvailable: !!wifiDevice
+    readonly property bool wifiEnabled: Networking.wifiEnabled
+    readonly property bool wifiBusy: false
+    readonly property bool wifiListRunning: wifiDevice ? wifiDevice.scannerEnabled : false
+    readonly property string wifiCurrentSsid: {
+        if (!wifiDevice || !wifiDevice.networks || !wifiDevice.networks.values) return "";
+        let nets = wifiDevice.networks.values;
+        for (let i = 0; i < nets.length; ++i) {
+            if (nets[i] && nets[i].connected) return nets[i].name;
+        }
+        return "";
+    }
+    readonly property string wifiInfoMessage: wifiLocalInfoMessage
+    readonly property string wifiError: wifiLocalError
+    readonly property string wifiUnsupportedReason: ""
     readonly property string wifiAvailabilityMessage: {
         if (wifiUnsupportedReason.length > 0) return wifiUnsupportedReason;
         if (wifiSupported && !wifiAvailable) return "No Wi-Fi device is available.";
@@ -123,7 +133,12 @@ Item {
     readonly property string bluetoothPairingDisplayedCode: bluetoothPairingAgent ? bluetoothPairingAgent.displayedCode : ""
     readonly property bool hasConnectivityPrompt: wifiPendingPasswordSsid.length > 0 || bluetoothPairingActive
     readonly property bool anyConnectivityPanelOpen: wifiPanelOpen || bluetoothPanelOpen
-    readonly property string wifiStatusText: wifiController ? wifiController.statusText : "Unavailable"
+    readonly property string wifiStatusText: {
+        if (!wifiEnabled) return "Off";
+        let ssid = wifiCurrentSsid;
+        if (ssid.length > 0) return ssid;
+        return "Not Connected";
+    }
     readonly property string bluetoothStatusText: buildBluetoothStatusText()
     readonly property string bluetoothAvailabilityMessage: bluetoothAvailable ? "" : "No Bluetooth adapter is available."
 
@@ -146,8 +161,7 @@ Item {
     function clearWifiMessages() {
         wifiLocalInfoMessage = "";
         wifiLocalError = "";
-        if (wifiController)
-            wifiController.clearMessages();
+
     }
 
     function clearBluetoothMessages() {
@@ -258,21 +272,19 @@ Item {
     }
 
     function requestWifiStateRefresh() {
-        if (!showCondition || !wifiController) return;
-        wifiController.refreshState();
+        if (!showCondition || !wifiDevice) return;
     }
 
     function requestWifiListRefresh(rescan) {
-        if (!showCondition || !wifiController) return;
+        if (!showCondition || !wifiDevice) return;
         if (!wifiSupported || !wifiAvailable || !wifiEnabled) return;
-        wifiController.refreshNetworks(!!rescan);
+        if (rescan) wifiDevice.requestScan();
     }
 
     function toggleWifiEnabled() {
         clearWifiPrompt();
         clearWifiMessages();
-        if (wifiController)
-            wifiController.setEnabled(!wifiEnabled);
+        Networking.wifiEnabled = !Networking.wifiEnabled;
     }
 
     function disconnectWifi() {
@@ -283,8 +295,13 @@ Item {
 
         clearWifiPrompt();
         clearWifiMessages();
-        if (wifiController)
-            wifiController.disconnectCurrent();
+        if (!wifiDevice || !wifiDevice.networks || !wifiDevice.networks.values) return;
+        let nets = wifiDevice.networks.values;
+        for (let i = 0; i < nets.length; ++i) {
+            if (nets[i] && nets[i].connected) {
+                nets[i].disconnect();
+            }
+        }
     }
 
     function connectWifiNetwork(network) {
@@ -303,38 +320,20 @@ Item {
         }
         if (network.connected) return;
 
-        const ssid = trimString(network.ssid);
-        const networkType = trimString(network.type);
-        const secure = !!network.secure;
-        const savedConnection = !!network.savedConnection;
+        const ssid = trimString(network.name);
+        const secure = network.security !== 0; // Assuming 0 is Open
+        const savedConnection = !!network.known;
 
         if (!ssid) {
             wifiLocalError = "Hidden networks are not supported in this panel yet.";
             return;
         }
 
-        if (!savedConnection && networkType === "wep") {
-            wifiLocalError = "WEP networks aren't supported by this panel.";
-            return;
-        }
-
-        if (!savedConnection && networkType === "8021x") {
-            wifiLocalError = "802.1X networks need to be provisioned first.";
-            return;
-        }
-
         clearWifiPrompt();
         clearWifiMessages();
 
-        if (savedConnection) {
-            if (wifiController)
-                wifiController.connectToNetwork(ssid);
-            return;
-        }
-
-        if (!secure) {
-            if (wifiController)
-                wifiController.connectToNetwork(ssid);
+        if (savedConnection || !secure) {
+            network.connect();
             return;
         }
 
@@ -355,8 +354,14 @@ Item {
         const password = wifiPendingPasswordValue;
         clearWifiPrompt();
         clearWifiMessages();
-        if (wifiController)
-            wifiController.connectToNetwork(ssid, password);
+        if (!wifiDevice || !wifiDevice.networks || !wifiDevice.networks.values) return;
+        let nets = wifiDevice.networks.values;
+        for (let i = 0; i < nets.length; ++i) {
+            if (nets[i].name === ssid) {
+                nets[i].connectWithPsk(password);
+                return;
+            }
+        }
     }
 
     function applyBrightnessOutput(text) {
@@ -661,6 +666,8 @@ Item {
 
     property var onTodoToggle: null
     property var onPomodoroToggle: null
+    property var onClipboardToggle: null
+    property var onVolumeMixerToggle: null
 
     Timer {
         id: brightnessApplyTimer
@@ -700,10 +707,10 @@ Item {
     }
 
     Connections {
-        target: wifiController
+        target: Networking
 
-        function onEnabledChanged() {
-            if (!controlCenter.wifiEnabled)
+        function onWifiEnabledChanged() {
+            if (!Networking.wifiEnabled)
                 controlCenter.clearWifiPrompt();
         }
     }
@@ -1505,10 +1512,14 @@ Item {
                         anchors.fill: parent
                         hoverEnabled: true
                         onClicked: {
-                            if (index === 2) {
+                            if (modelData.command === "__todo__") {
                                 if (controlCenter.onTodoToggle) controlCenter.onTodoToggle();
-                            } else if (index === 3) {
+                            } else if (modelData.command === "__pomodoro__") {
                                 if (controlCenter.onPomodoroToggle) controlCenter.onPomodoroToggle();
+                            } else if (modelData.command === "__clipboard__") {
+                                if (controlCenter.onClipboardToggle) controlCenter.onClipboardToggle();
+                            } else if (modelData.command === "__volume_mixer__") {
+                                if (controlCenter.onVolumeMixerToggle) controlCenter.onVolumeMixerToggle();
                             } else {
                                 actionExec.exec(["sh", "-c", modelData.command]);
                             }

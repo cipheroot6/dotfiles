@@ -26,8 +26,9 @@ Item {
     property string previousLyricText: ""
     property real lyricChangeProgress: 1
 
-    readonly property real clampedProgress: Math.max(0, Math.min(1, transitionProgress))
-    readonly property bool lyricMostlyVisible: clampedProgress > 0.92
+    readonly property real timeClampedProgress: Math.max(0, Math.min(1, transitionProgress))
+    readonly property real lyricClampedProgress: Math.max(0, Math.min(1, transitionProgress - 1))
+    readonly property bool lyricMostlyVisible: lyricClampedProgress > 0.92
     readonly property real textWidth: Math.max(0, width - horizontalPadding * 2)
     readonly property real centeredX: horizontalPadding
     readonly property real lyricHiddenLeftX: -textWidth - hiddenLeftPadding
@@ -35,8 +36,8 @@ Item {
     readonly property real lyricEntryDistance: Math.max(0, centeredX - lyricHiddenLeftX)
     readonly property real timeExitDistance: Math.max(0, timeHiddenRightX - centeredX)
     readonly property real dragDistance: Math.max(lyricEntryDistance, timeExitDistance)
-    readonly property real lyricX: centeredX - (1 - clampedProgress) * dragDistance
-    readonly property real timeX: centeredX + clampedProgress * dragDistance
+    readonly property real lyricX: centeredX - (1 - lyricClampedProgress) * dragDistance
+    readonly property real timeX: centeredX + timeClampedProgress * dragDistance
     readonly property real preferredWidth: Math.max(
         minimumWidth,
         Math.min(Math.max(minimumWidth, maximumWidth), lyricMetrics.advanceWidth + horizontalPadding * 2 + 28)
@@ -119,7 +120,7 @@ Item {
         anchors.verticalCenterOffset: -14 * lyricChangeProgress
         text: previousLyricText
         color: "white"
-        opacity: clampedProgress * (1 - lyricChangeProgress)
+        opacity: lyricClampedProgress * (1 - lyricChangeProgress)
         font.pixelSize: textPixelSize
         font.family: textFontFamily
         font.weight: Font.DemiBold
@@ -137,7 +138,7 @@ Item {
         anchors.verticalCenterOffset: previousLyricText !== "" ? 12 * (1 - lyricChangeProgress) : 0
         text: activeLyricText
         color: "white"
-        opacity: clampedProgress * (previousLyricText !== "" ? lyricChangeProgress : 1)
+        opacity: lyricClampedProgress * (previousLyricText !== "" ? lyricChangeProgress : 1)
         font.pixelSize: textPixelSize
         font.family: textFontFamily
         font.weight: Font.DemiBold
@@ -150,21 +151,21 @@ Item {
     Text {
         visible: timeText !== "" && showSecondaryText
         id: timeTextItem
-        x: (clampedProgress > 0)
+        x: (timeClampedProgress > 0)
             ? timeX
             : (userConfig.petEnabled ? 58 : (root.bothRunning ? 56 : (root.persistentRingActive ? 16 : (parent.width - implicitWidth) / 2)))
-        width: (clampedProgress > 0)
+        width: (timeClampedProgress > 0)
             ? textWidth
             : (userConfig.petEnabled ? (parent.width - 58 - 16) : implicitWidth)
         anchors.verticalCenter: parent.verticalCenter
         text: timeText
         color: "white"
-        opacity: 1 - clampedProgress
+        opacity: 1 - timeClampedProgress
         font.pixelSize: textPixelSize + 1
         font.family: timeFontFamily
         font.weight: Font.Bold
         font.letterSpacing: -0.25
-        horizontalAlignment: (clampedProgress > 0 || userConfig.petEnabled || root.persistentRingActive || root.bothRunning)
+        horizontalAlignment: (timeClampedProgress > 0 || userConfig.petEnabled || root.persistentRingActive || root.bothRunning)
             ? Text.AlignLeft
             : Text.AlignHCenter
         elide: Text.ElideRight

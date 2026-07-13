@@ -143,6 +143,28 @@ Scope {
         }
     }
 
+    IpcHandler {
+        target: "aiprompt"
+        function toggle() {
+            shellRoot.forEachWindow((w) => { if (w && w.toggleAiPrompt) w.toggleAiPrompt(); });
+        }
+    }
+
+    IpcHandler {
+        target: "clipboard"
+        function toggle() {
+            shellRoot.forEachWindow((w) => { if (w && w.toggleClipboard) w.toggleClipboard(); });
+        }
+    }
+
+    IpcHandler {
+        target: "volume-mixer"
+        function toggle() {
+            shellRoot.forEachWindow((w) => { if (w && w.toggleVolumeMixer) w.toggleVolumeMixer(); });
+        }
+    }
+
+
     Variants {
         id: panelVariants
 

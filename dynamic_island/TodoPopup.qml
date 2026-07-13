@@ -85,11 +85,8 @@ PanelWindow {
         }
 
         function remove(index) {
-            const text = itemModel.get(index).itemText;
             itemModel.remove(index);
-            const esc = text.replace(/[[\]().*+?^${}|\\]/g, "\\$&");
-            const pattern = "^- \\[ \\] " + esc + "$";
-            removeWriter.exec(["sh", "-c", 'sed -i "/$1/d" "$0"', root.todoPath, pattern]);
+            saveAll();
         }
 
         function move(from, to) {

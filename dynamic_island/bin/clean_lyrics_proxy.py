@@ -2,6 +2,7 @@ import http.server
 import urllib.request
 import urllib.parse
 import re
+import requests
 import sys
 import os
 import json
@@ -357,27 +358,22 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             target_query = urllib.parse.urlencode(target_params)
             target_url = f"https://lrclib.net/api/get?{target_query}"
 
-            req = urllib.request.Request(
-                target_url,
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) lyricsmpris-proxy/1.0'
-                }
-            )
-
             try:
                 log(f"Fetching exact: {target_url}")
-                with urllib.request.urlopen(req, timeout=5) as response:
-                    content = response.read()
-                    log(f"Exact match found. Status: {response.status}")
-                    self.send_response(response.status)
-                    for header, val in response.getheaders():
-                        if header.lower() not in ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade']:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) lyricsmpris-proxy/1.0'
+                }
+                r = requests.get(target_url, headers=headers, timeout=5)
+                if r.status_code == 200:
+                    log(f"Exact match found. Status: {r.status_code}")
+                    self.send_response(200)
+                    for header, val in r.headers.items():
+                        if header.lower() not in ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade', 'content-encoding', 'transfer-encoding']:
                             self.send_header(header, val)
                     self.end_headers()
-                    self.wfile.write(content)
+                    self.wfile.write(r.content)
                     return
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
+                elif r.status_code == 404:
                     log("Exact match returned 404. Checking for primary artist fallback...")
                     # Try exact match with primary artist if it exists and is different
                     primary_artist = get_primary_artist(cleaned_artist)
@@ -385,38 +381,31 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         target_params['artist_name'] = primary_artist
                         target_query = urllib.parse.urlencode(target_params)
                         target_url = f"https://lrclib.net/api/get?{target_query}"
-                        req = urllib.request.Request(
-                            target_url,
-                            headers={
-                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) lyricsmpris-proxy/1.0'
-                            }
-                        )
                         try:
                             log(f"Fetching exact with primary artist: {target_url}")
-                            with urllib.request.urlopen(req, timeout=5) as response:
-                                content = response.read()
-                                log(f"Exact match with primary artist found. Status: {response.status}")
-                                self.send_response(response.status)
-                                for header, val in response.getheaders():
-                                    if header.lower() not in ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade']:
+                            r_primary = requests.get(target_url, headers=headers, timeout=5)
+                            if r_primary.status_code == 200:
+                                log(f"Exact match with primary artist found. Status: {r_primary.status_code}")
+                                self.send_response(200)
+                                for header, val in r_primary.headers.items():
+                                    if header.lower() not in ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade', 'content-encoding', 'transfer-encoding']:
                                         self.send_header(header, val)
                                 self.end_headers()
-                                self.wfile.write(content)
+                                self.wfile.write(r_primary.content)
                                 return
-                        except urllib.error.HTTPError as e_primary:
-                            if e_primary.code == 404:
+                            elif r_primary.status_code == 404:
                                 log("Exact match with primary artist returned 404. Falling back to fuzzy search...")
                             else:
-                                log(f"HTTPError on exact match with primary artist: {e_primary.code}")
+                                log(f"HTTPError on exact match with primary artist: {r_primary.status_code}")
                         except Exception as e_primary:
                             log(f"Connection error on exact match with primary artist: {str(e_primary)}")
                     else:
                         log("No primary artist fallback available. Falling back to fuzzy search...")
                 else:
-                    log(f"HTTPError on exact match: {e.code}")
-                    self.send_response(e.code)
+                    log(f"HTTPError on exact match: {r.status_code}")
+                    self.send_response(r.status_code)
                     self.end_headers()
-                    self.wfile.write(e.read())
+                    self.wfile.write(r.content)
                     return
             except Exception as e:
                 log(f"Connection error on exact match: {str(e)}")
@@ -430,17 +419,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         search_url = f"https://lrclib.net/api/search?q={urllib.parse.quote(search_query)}"
         log(f"Fuzzy search query: {search_url}")
 
-        search_req = urllib.request.Request(
-            search_url,
-            headers={
+        try:
+            headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) lyricsmpris-proxy/1.0'
             }
-        )
-
-        try:
-            with urllib.request.urlopen(search_req, timeout=5) as response:
-                search_data = response.read()
-                results = json.loads(search_data.decode('utf-8'))
+            r_search = requests.get(search_url, headers=headers, timeout=5)
+            if r_search.status_code == 200:
+                results = r_search.json()
                 if isinstance(results, list) and len(results) > 0:
                     # Find the first result that actually contains lyrics
                     best_match = None
@@ -462,6 +447,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     return
                 else:
                     log("Fuzzy search returned no results.")
+            else:
+                log(f"HTTPError on fuzzy search: {r_search.status_code}")
         except Exception as e:
             log(f"Fuzzy search failed: {str(e)}")
 
