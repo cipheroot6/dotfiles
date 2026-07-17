@@ -98,11 +98,21 @@ Item {
                 
                 delegate: Item {
                     width: ListView.view.width
-                    height: bubble.height
+                    height: bubble.height + (model.role === "assistant" ? 28 : 0)
                     
                     Rectangle {
                         id: bubble
-                        width: Math.min(messageText.implicitWidth + 24, parent.width * 0.9)
+                        
+                        Text {
+                            id: widthHelper
+                            text: model.content
+                            font.family: textFontFamily
+                            font.pixelSize: 14
+                            textFormat: Text.MarkdownText
+                            visible: false
+                        }
+                        
+                        width: Math.min(widthHelper.implicitWidth + 24, parent.width)
                         height: messageText.implicitHeight + 16
                         radius: 12
                         color: model.role === "user" ? accentColor : "transparent"
@@ -117,6 +127,7 @@ Item {
                             anchors.margins: 12
                             anchors.topMargin: 8
                             anchors.bottomMargin: 8
+                            padding: 0
                             text: model.content
                             color: model.role === "user" ? "#1e1e2e" : textColor
                             font.family: textFontFamily
@@ -126,6 +137,47 @@ Item {
                             readOnly: true
                             selectByMouse: true
                             background: null
+                        }
+                    }
+                    
+                    Rectangle {
+                        id: copyBtn
+                        visible: model.role === "assistant"
+                        width: 50
+                        height: 24
+                        anchors.top: bubble.bottom
+                        anchors.topMargin: 4
+                        anchors.left: bubble.left
+                        color: copyMouse.containsMouse ? Qt.rgba(255, 255, 255, 0.1) : "transparent"
+                        radius: 6
+                        
+                        Text {
+                            id: copyText
+                            text: "Copy"
+                            color: Qt.rgba(textColor.r, textColor.g, textColor.b, 0.6)
+                            font.family: textFontFamily
+                            font.pixelSize: 12
+                            anchors.centerIn: parent
+                        }
+                        
+                        MouseArea {
+                            id: copyMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                messageText.selectAll();
+                                messageText.copy();
+                                messageText.deselect();
+                                copyText.text = "Copied!";
+                                copyFeedbackTimer.start();
+                            }
+                        }
+                        
+                        Timer {
+                            id: copyFeedbackTimer
+                            interval: 1500
+                            onTriggered: copyText.text = "Copy"
                         }
                     }
                 }

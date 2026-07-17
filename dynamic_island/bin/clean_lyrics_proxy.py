@@ -6,6 +6,9 @@ import requests
 import sys
 import os
 import json
+import subprocess
+import tempfile
+import threading
 from datetime import datetime
 
 PORT = 8765
@@ -73,7 +76,7 @@ def is_suspected_channel(artist):
         "lyrics", "lyric", "music", "vibes", "tv", "records", "channel",
         "playlist", "nation", "promotions", "distribution", "records", "trax",
         "tunes", "sound", "sounds", "central", "club", "dance", "hits", "release",
-        "beats", "station"
+        "beats", "station", "vevo"
     ]
     for kw in channel_keywords:
         if kw in artist_lower:
@@ -223,6 +226,239 @@ def clean_track_and_artist(track, artist):
 
 DB_PATH = "/home/cipheroot/.cache/quickshell/lyricsmpris/cache.db"
 
+# ---------------------------------------------------------------------------
+# YouTube Caption Fallback
+# ---------------------------------------------------------------------------
+# In-memory cache: key = (track_name, artist_name), value = list of
+# {start_ms: int, end_ms: int, text: str} sorted by start_ms.
+_yt_caption_cache = {}
+_yt_caption_cache_lock = threading.Lock()
+# Tracks currently being fetched so we don't launch duplicate yt-dlp processes
+_yt_caption_fetching = set()
+
+YT_DLP_PATH = "/usr/bin/yt-dlp"
+
+
+def _parse_json3_events(json3_data):
+    """Convert yt-dlp json3 subtitle data into sorted caption events.
+
+    Handles two formats:
+    - Simple: each event has segs with a single utf8 string (English closed captions)
+    - Word-level: each event has segs with tOffsetMs per word + aAppend continuation
+      events (Japanese/Korean/etc. ASR auto-captions)
+    """
+    events = json3_data.get("events", [])
+    captions = []
+
+    # First pass: group word-level events by wWinId window if they use aAppend
+    # We collect all non-append events as anchor points and merge appended text
+    merged = []  # list of {start_ms, end_ms, text}
+    active_wins = {}  # wWinId -> {start_ms, end_ms, text}
+
+    for ev in events:
+        segs = ev.get("segs", [])
+        if not segs:
+            continue
+        start_ms = ev.get("tStartMs", 0)
+        dur_ms = ev.get("dDurationMs", 2000)
+        end_ms = start_ms + dur_ms
+        win_id = ev.get("wWinId")
+        is_append = ev.get("aAppend", 0) == 1
+
+        # Build text from segs (concatenate utf8, ignore newline-only segs for display)
+        text = "".join(s.get("utf8", "") for s in segs)
+
+        if win_id is not None:
+            # Word-level caption with window grouping
+            if is_append:
+                if win_id in active_wins:
+                    active_wins[win_id]["end_ms"] = max(active_wins[win_id]["end_ms"], end_ms)
+                    active_wins[win_id]["text"] += text
+            else:
+                # New window: flush any existing window with same ID
+                if win_id in active_wins:
+                    merged.append(active_wins[win_id])
+                active_wins[win_id] = {"start_ms": start_ms, "end_ms": end_ms, "text": text}
+        else:
+            # Simple event without window grouping
+            # Flush any open windows first
+            for w in list(active_wins.values()):
+                merged.append(w)
+            active_wins.clear()
+            merged.append({"start_ms": start_ms, "end_ms": end_ms, "text": text})
+
+    # Flush remaining open windows
+    for w in active_wins.values():
+        merged.append(w)
+
+    # Second pass: clean and filter
+    for item in merged:
+        text = " ".join(item["text"].splitlines()).strip()
+        # Skip pure music/punctuation-only lines
+        if not text or re.match(r'^[\[\(\u266a\s\]\)\-_=]+$', text):
+            continue
+        captions.append({
+            "start_ms": item["start_ms"],
+            "end_ms": item["end_ms"],
+            "text": text
+        })
+
+    captions.sort(key=lambda c: c["start_ms"])
+    return captions
+
+
+def _run_yt_dlp_for_subs(search_term, sub_langs, tmpdir, timeout=40):
+    """Run yt-dlp to download subtitles. Returns path to first json3 file, or None."""
+    # Clear previous run files
+    for fname in os.listdir(tmpdir):
+        try:
+            os.remove(os.path.join(tmpdir, fname))
+        except Exception:
+            pass
+    out_template = os.path.join(tmpdir, "cap")
+    cmd = [
+        YT_DLP_PATH,
+        search_term,
+        "--write-auto-subs",
+        "--write-subs",
+        "--skip-download",
+        "--no-playlist",
+        "--sub-format", "json3",
+        "--sub-langs", sub_langs,
+        "-o", out_template,
+        "--quiet",
+        "--no-warnings",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    log(f"[YT Captions] yt-dlp exit={result.returncode} (langs={sub_langs!r})")
+    if result.returncode != 0 and result.stderr:
+        log(f"[YT Captions] yt-dlp error output: {result.stderr.strip()}")
+    for fname in sorted(os.listdir(tmpdir)):
+        if fname.endswith(".json3"):
+            fpath = os.path.join(tmpdir, fname)
+            log(f"[YT Captions] Found subtitle file: {fname}")
+            return fpath
+    return None
+
+
+def _do_fetch_yt_captions(key, track_name, artist_name, track_url=None):
+    """Background thread: search YouTube and download captions into the in-memory cache."""
+    try:
+        query = get_fuzzy_search_query(track_name, artist_name)
+        log(f"[YT Captions] Searching YouTube for: {query!r}")
+
+        # Try strategies in order until we get subtitles.
+        # Each strategy combines original-language auto-subs (.*-orig) with English (en)
+        # so we get Japanese for YOASOBI, Russian for Russian songs, English for English songs —
+        # all in one yt-dlp pass across the top search results.
+        strategies = [
+            (f"ytsearch3:{query} -lyrics", ".*-orig,en.*"), # Best: exclude lyrics compilations, prioritize official MV/audio (perfect sync)
+            (f"ytsearch3:{query}, cc", ".*-orig,en.*"),     # Fallback: explicit CC (risks live performance desync, but better than nothing)
+            (f"ytsearch5:{query}", "en.*"),                 # wider net, fallback
+        ]
+
+        c_url = clean_youtube_url(track_url)
+        if c_url:
+            log(f"[YT Captions] Exact URL provided: {c_url}")
+            strategies = [
+                (c_url, ".*-orig,en.*"),
+                (c_url, "en.*")
+            ]
+
+        json3_data = None
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for search_term, sub_langs in strategies:
+                try:
+                    json3_file = _run_yt_dlp_for_subs(search_term, sub_langs, tmpdir, timeout=40)
+                except subprocess.TimeoutExpired:
+                    log(f"[YT Captions] yt-dlp timed out for strategy (langs={sub_langs!r})")
+                    continue
+                except Exception as e:
+                    log(f"[YT Captions] yt-dlp error for strategy (langs={sub_langs!r}): {e}")
+                    continue
+
+                if json3_file:
+                    with open(json3_file, "r", encoding="utf-8") as f:
+                        json3_data = json.load(f)
+                    break
+                log(f"[YT Captions] No subtitle found with langs={sub_langs!r}, trying next strategy...")
+
+        if not json3_data:
+            log("[YT Captions] No subtitle file found after all strategies.")
+            with _yt_caption_cache_lock:
+                _yt_caption_cache[key] = []
+                _yt_caption_fetching.discard(key)
+            return
+
+        captions = _parse_json3_events(json3_data)
+        log(f"[YT Captions] Parsed {len(captions)} caption events.")
+        with _yt_caption_cache_lock:
+            _yt_caption_cache[key] = captions
+            _yt_caption_fetching.discard(key)
+
+    except Exception as exc:
+        log(f"[YT Captions] Error fetching captions: {exc}")
+        with _yt_caption_cache_lock:
+            _yt_caption_cache[key] = []
+            _yt_caption_fetching.discard(key)
+
+
+def clean_youtube_url(url):
+    if not url or ("youtube.com" not in url and "youtu.be" not in url):
+        return ""
+    parsed = urllib.parse.urlparse(url)
+    if "youtu.be" in parsed.netloc:
+        video_id = parsed.path.lstrip('/')
+        return f"https://www.youtube.com/watch?v={video_id}"
+    elif "youtube.com" in parsed.netloc:
+        qs = urllib.parse.parse_qs(parsed.query)
+        if 'v' in qs:
+            return f"https://www.youtube.com/watch?v={qs['v'][0]}"
+    return ""
+
+
+def _fetch_yt_captions_for_track(track_name, artist_name, track_url=None):
+    """Return cached caption list, start background fetch if needed, or None if still fetching."""
+    c_url = clean_youtube_url(track_url)
+    if c_url:
+        key = ("__yturl__", c_url)
+    else:
+        key = (track_name.lower().strip(), artist_name.lower().strip())
+        
+    with _yt_caption_cache_lock:
+        if key in _yt_caption_cache:
+            return _yt_caption_cache[key]
+        if key in _yt_caption_fetching:
+            return None  # background thread already running — caller should retry
+        _yt_caption_fetching.add(key)
+
+    # Start non-blocking fetch so the HTTP response returns 202 immediately
+    t = threading.Thread(target=_do_fetch_yt_captions, args=(key, track_name, artist_name, track_url), daemon=True)
+    t.start()
+    return None  # not ready yet
+
+
+def _get_caption_at(captions, position_ms):
+    """Return the best caption dict for the given position, or None."""
+    if not captions:
+        return None
+    # Find the last event that has already started
+    best = None
+    for cap in captions:
+        if cap["start_ms"] <= position_ms:
+            if cap["end_ms"] > position_ms:
+                # Currently active
+                best = cap
+        else:
+            break  # sorted, so no need to continue
+    # If nothing active, look ahead for the next upcoming line (within 3s)
+    if best is None:
+        for cap in captions:
+            if cap["start_ms"] > position_ms and cap["start_ms"] - position_ms <= 3000:
+                best = cap
+                break
+    return best
+
 def normalize_and_lower(s):
     if not s:
         return ""
@@ -304,9 +540,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"Shutting down proxy")
-            import threading
             import time
             threading.Thread(target=lambda: (time.sleep(0.5), os._exit(0))).start()
+            return
+
+        if parsed_url.path == '/ytcaptions':
+            self._handle_ytcaptions(parsed_url)
             return
 
         if parsed_url.path != '/dget':
@@ -409,8 +648,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     return
             except Exception as e:
                 log(f"Connection error on exact match: {str(e)}")
-                self.send_error(500, str(e))
-                return
+                # Do not return 500 here (it crashes lyricsmpris), fall back to fuzzy search
         else:
             log("No artist name available for exact match. Falling back to fuzzy search...")
 
@@ -458,11 +696,69 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps({"error": "Lyrics not found"}).encode('utf-8'))
 
+    def _handle_ytcaptions(self, parsed_url):
+        """GET /ytcaptions?track_name=...&artist_name=...&position_ms=..."""
+        query_params = urllib.parse.parse_qs(parsed_url.query)
+        track_name = query_params.get('track_name', [''])[0].strip()
+        artist_name = query_params.get('artist_name', [''])[0].strip()
+        position_ms = int(query_params.get('position_ms', ['0'])[0])
+        track_url = query_params.get('url', [''])[0].strip()
+        
+        c_url = clean_youtube_url(track_url)
+
+        if not c_url and is_junk_track(track_name):
+            self.send_response(404)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": "junk track"}).encode())
+            return
+
+        log(f"[YT Captions] Request: track={track_name!r} artist={artist_name!r} pos={position_ms}ms url={c_url!r}")
+
+        captions = _fetch_yt_captions_for_track(track_name, artist_name, track_url)
+
+        if captions is None:
+            # Still fetching in background — tell client to retry
+            self.send_response(202)  # Accepted
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "fetching"}).encode())
+            return
+
+        cap = _get_caption_at(captions, position_ms)
+
+        if cap:
+            # Compute ms until next caption starts (so QML can schedule next poll)
+            idx = captions.index(cap)
+            next_start = captions[idx + 1]["start_ms"] if idx + 1 < len(captions) else cap["end_ms"]
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "text": cap["text"],
+                "start_ms": cap["start_ms"],
+                "end_ms": cap["end_ms"],
+                "next_start_ms": next_start,
+                "total": len(captions)
+            }).encode())
+        else:
+            # No caption at this position (silence / gap)
+            # Find next caption for QML timing
+            next_cap = next((c for c in captions if c["start_ms"] > position_ms), None)
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "text": "",
+                "next_start_ms": next_cap["start_ms"] if next_cap else -1,
+                "total": len(captions)
+            }).encode())
+
     def log_message(self, format, *args):
         pass
 
 if __name__ == '__main__':
-    server = http.server.HTTPServer(('127.0.0.1', PORT), ProxyHandler)
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', PORT), ProxyHandler)
     log(f"Proxy server starting on port {PORT}...")
     try:
         server.serve_forever()

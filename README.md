@@ -1,13 +1,7 @@
-# dotfiles
+# Cipheroot's Dotfiles
 
 <p align="center">
   <strong>Arch Linux · Hyprland · Catppuccin Mocha · Omarchy</strong>
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/github/stars/cipheroot/dotfiles?style=for-the-badge&logo=github&color=f5c2e7&labelColor=313244" alt="Stars">
-  <img src="https://img.shields.io/github/last-commit/cipheroot/dotfiles?style=for-the-badge&logo=git&color=a6adc8&labelColor=313244" alt="Last Commit">
-  <img src="https://img.shields.io/github/repo-size/cipheroot/dotfiles?style=for-the-badge&logo=files&color=89b4fa&labelColor=313244" alt="Repo Size">
 </p>
 
 <p align="center">
@@ -16,374 +10,134 @@
   <img src="https://img.shields.io/badge/Theme-Catppuccin_Mocha-f5e0dc?style=for-the-badge&logo=catppuccin&logoColor=white&labelColor=313244" alt="Catppuccin">
 </p>
 
-A premium, highly-styled Arch Linux desktop setup built on the **Omarchy** framework. Features a custom macOS-style QML **Dynamic Island** overlay, a military-grade **Encryption Vault**, and a meticulously themed **Catppuccin Mocha** environment across every component.
+Welcome to my daily-driver Arch Linux setup. It's built on top of the Omarchy framework, runs on Hyprland, and is completely saturated in Catppuccin Mocha (because who doesn't love purple?). 
 
-<p align="center">
-  <a href="#highlights"><kbd>Highlights</kbd></a>
-  <a href="#tech-stack"><kbd>Tech Stack</kbd></a>
-  <a href="#keybindings"><kbd>Keybindings</kbd></a>
-  <a href="#installation"><kbd>Installation</kbd></a>
-  <a href="#file-structure"><kbd>Structure</kbd></a>
-</p>
+I've spent way too much time tweaking this setup. The crown jewel is my custom **Dynamic Island**—a macOS-style overlay that I built from scratch using QML and QuickShell. I also built a completely custom, RAM-only **Encryption Vault** script for my files.
 
 ---
 
-## Table of Contents
+## 🏝️ The Dynamic Island (QuickShell)
 
-1. [Highlights](#highlights)
-2. [Tech Stack](#tech-stack)
-3. [Showcase](#showcase)
-4. [Keybindings](#keybindings)
-5. [Installation](#installation)
-6. [File Structure](#file-structure)
-7. [Notes & Caveats](#notes--caveats)
-8. [Credits](#credits)
+This isn't just a gimmick to look like macOS; it's practically the nerve center of my desktop. It's a floating capsule at the top of the screen that morphs into **27 different UI layers** depending on what's happening.
 
----
+*   **Media & Lyrics:** Shows album art and playback controls, but the coolest part is the synced lyrics. I built a Python backend proxy that hits LRCLib, caches results in a SQLite zstd database, and feeds them to the island.
+*   **Productivity Tools:** Fully integrated Pomodoro timer (25/5 min sessions), Stopwatch, Calendar, and a 15-item Clipboard history viewer.
+*   **AI Prompt:** I baked a chat interface directly into the island that can talk to Ollama and OpenAI APIs.
+*   **Workspace Overview:** A live Hyprland workspace grid that shows real-time window thumbnails.
+*   **The Backends:** To make all this run smoothly without lagging the compositor, I had to write custom **C++ backends** (for battery, audio, brightness, lyrics, Hyprland IPC, WiFi, and Bluetooth) and **Python backends** (for the lyrics proxy, AI web search, and volume mixer).
+*   **Desktop Pet:** Swipe on the island and you'll find a desktop pet cat drawn entirely on a QML Canvas using over 900 lines of logic. Because why not?
 
-## Highlights
+## 🔐 The Encryption Vault (v5.2)
 
-*   **Dynamic Island (QML/QuickShell)**
-    *   macOS-style floating capsule that morphs into expanded panels for various system states.
-    *   27 UI layers including ExpandedPlayer, ControlCenter, Notification, OSD, Calendar, Pomodoro, Timer, Stopwatch, AiPrompt, Clipboard, VolumeMixer, Lyrics, SystemInfo, PetCat, and WorkspaceOverview.
-    *   State machine transitions between normal, expanded, control center, notification, and specialized tool modes.
-    *   C++ backends for battery, audio, brightness, lyrics, Hyprland IPC, WiFi, and Bluetooth.
-    *   Python backends for lyrics proxy (LRCLib + SQLite zstd cache), AI web search, volume mixer, and clipboard history.
-    *   Desktop pet cat drawn on a Canvas with over 900 lines of logic.
-    *   Control center with volume and brightness sliders, WiFi/BT toggles, and quick actions.
+I needed a way to encrypt sensitive stuff without leaving traces on the disk, so I wrote my own bash-based vault pipeline (`scripts/enc` & `dec`). It treats data like classified documents.
 
-*   **Encryption Vault (v5.2)**
-    *   High-security file encryption system using Argon2id KDF (t=3, m=16MiB, p=4).
-    *   Supports 6 ciphers: AES-256-GCM (default), AES-256-CTR+HMAC, ChaCha20+HMAC, AES-128-CTR+HMAC, age, and none.
-    *   10 compression algorithms including zstd, gzip, lz4, bzip2, xz, brotli, 7z/LZMA, zlib, and lzop.
-    *   RAM-only processing in `/dev/shm` with a 100MiB limit to prevent disk traces.
-    *   HMAC-SHA256 verification over header and ciphertext.
-    *   Post-write verification that re-reads and trial-decrypts to ensure data integrity.
+*   **Zero Disk Footprint:** All processing happens entirely in RAM (`/dev/shm`), strictly capped at 100MiB. It streams `tar | compress | openssl enc`, meaning only the final ciphertext file ever touches your actual SSD.
+*   **The Crypto:** It uses an **Argon2id KDF** (t=3, m=16MiB, p=4) and supports 6 ciphers. My default is **AES-256-GCM**, but it also falls back to AES-256-CTR+HMAC, ChaCha20+HMAC, etc.
+*   **Compression:** Supports 10 different algorithms (zstd, gzip, lz4, bzip2, xz, brotli, 7z/LZMA, zlib, lzop).
+*   **Verification:** It runs HMAC-SHA256 verification over the header and ciphertext, and even does a post-write trial decryption to ensure the data isn't corrupted before you delete the originals. It also has 5-layer traversal guards to prevent path extraction attacks.
 
-*   **Waybar Status Bar**
-    *   Semi-transparent rounded modules with a custom Catppuccin Mocha color scheme.
-    *   Custom widgets for CAVA (60fps unicode bars), VPN detection (ProtonVPN country detect + cache), weather (wttr.in + auto-hide during media), and live network traffic (vnstat).
-    *   Uses JetBrainsMono Nerd Font Propo for a clean, modern look.
+## 🎨 UI & Aesthetics
 
-*   **Hyprland Configuration**
-    *   Modular configuration split into specialized files for bindings, autostart, input, and look-and-feel.
-    *   3-tier config layering: Omarchy defaults, theme settings, and user overrides.
-    *   35px window rounding and custom opacity rules for different applications.
-    *   78 RGB variables defined in `mocha.config` for consistent theming.
+Everything is designed to be cohesive, semi-transparent, and heavily rounded.
 
-*   **Terminal Environment**
-    *   Ghostty terminal with VictorMono Nerd Font, 0.5 opacity, and borderless design.
-    *   Zsh shell with Oh My Zsh and Starship prompt.
-    *   55 productivity aliases for eza, bat, fastfetch, git, and development helpers.
-    *   Custom fastfetch config with a graphic logo and detailed system info.
+*   **Hyprland:** I use a massive 35px window rounding to match the Dynamic Island. Window opacities are carefully tuned (0.75/0.65 for most apps, 1.0/0.70 for the terminal, 0.60 for Spotify). 
+*   **Waybar:** Custom rounded modules styled with JetBrainsMono Nerd Font Propo. It features a 60fps unicode CAVA visualizer (`▁▂▃▄▅▆▇█`), live `vnstat` network traffic, weather (`wttr.in`) that auto-hides when media is playing, and a ProtonVPN country detector with local caching.
+*   **Terminal Environment:** I use **Ghostty** (0.5 opacity, borderless) rendering the VictorMono Nerd Font at 12px. The shell is **Zsh** paired with the **Starship** prompt and 55 custom aliases to keep things fast.
 
 ---
 
-## Tech Stack
+## ⌨️ Keybindings
 
-| Component | Choice | Why |
-| :--- | :--- | :--- |
-| **Compositor** | Hyprland | Dynamic tiling, smooth animations, and Wayland native performance. |
-| **Framework** | Omarchy | Provides a solid foundation for keybindings, autostart, and theme management. |
-| **Colors** | Catppuccin Mocha | A soothing, high-contrast dark theme that is easy on the eyes. |
-| **Terminal** | Ghostty | Fast, GPU-accelerated, and supports modern features like epoll async. |
-| **Shell** | ZSH + Starship | Highly customizable prompt with fast execution and rich plugin support. |
-| **Status Bar** | Waybar | Highly flexible CSS-based styling and support for custom script modules. |
-| **Overlay** | QuickShell | Enables building complex, stateful UI components using QML and C++. |
-| **Security** | Custom Scripts | Tailored encryption pipeline with Argon2id and AES-256-GCM for maximum privacy. |
+My whole workflow revolves around the `SUPER` key. 
 
----
-
-## Showcase
-
-### Dynamic Island
-
-The centerpiece. A floating capsule at the top of your screen that morphs into 27 different UI layers based on system state:
-
-| State | What You Get |
-| :--- | :--- |
-| **Normal** | Minimal capsule showing active workspace icon |
-| **Music** | Album art, track info, controls, synced lyrics, 8-bar audio visualizer |
-| **Control Center** | Volume/brightness sliders, WiFi/BT toggles, clock, quick actions |
-| **Notifications** | Desktop notification display with dismiss |
-| **Pomodoro** | 25/5 min timer with session counter |
-| **AI Prompt** | Chat interface compatible with Ollama and OpenAI APIs |
-| **Clipboard** | History viewer (15-item store) |
-| **Workspace Overview** | Live Hyprland workspace grid with window thumbnails |
-
-Swipe gestures reveal system info (CPU, RAM, disk, temperature) and a desktop pet cat drawn entirely on Canvas.
-
-### Encryption Vault
-
-A command-line encryption tool that treats your data like classified documents:
-
-```bash
-# Encrypt a directory
-enc -l "my-secrets" -a 1 -c 1 secret_folder/
-
-# Decrypt it
-dec my-secrets.vault
-```
-
-**Security model**: All processing happens in RAM (`/dev/shm`) — nothing touches disk. The pipeline streams `tar | compress | openssl enc` so only one ciphertext file exists at a time. Decryption includes 5-layer traversal guards against path attacks.
-
-### Waybar & CAVA
-
-Semi-transparent rounded modules with Catppuccin Mocha colors per category:
-
-| Widget | Behavior |
-| :--- | :--- |
-| **CAVA** | 60fps Unicode audio bars (`▁▂▃▄▅▆▇█`), flat when paused |
-| **VPN** | ProtonVPN country detection with local cache |
-| **Weather** | wttr.in forecasts, auto-hides during media playback |
-| **Traffic** | vnstat live speeds + daily/monthly totals |
-
-### Hyprland Compositor
-
-- **35px window rounding** matching the Dynamic Island aesthetic
-- **Opacity rules**: 0.75/0.65 default, 1.0/0.70 Ghostty, 0.60 Spotify
-- **3-tier config**: Omarchy defaults → theme → user overrides
-- **78 Catppuccin Mocha RGB variables** in `mocha.config`
-- **138 GLSL shader effects** available (requires `aether` package)
-
-### Terminal Environment
-
-- **Ghostty**: VictorMono Nerd Font 12px, 50% opacity, borderless, epoll async
-- **Zsh**: Oh My Zsh + Starship prompt + 55 productivity aliases
-- **Fastfetch**: Custom logo, CPU temps, install age, magenta theme
-
----
-
-## Keybindings
-
-### Application Launchers
-
+### Launching Stuff
 | Keybind | Action |
 | :--- | :--- |
-| `SUPER + Return` | Launch Terminal (Ghostty) |
-| `SUPER + Alt + Return` | Launch Terminal + Tmux |
-| `SUPER + Shift + Return` | Launch Web Browser |
-| `SUPER + Shift + F` | Open File Manager (Nautilus) |
-| `SUPER + Alt + Shift + F` | Open File Manager at CWD |
-| `SUPER + Shift + D` | Launch Docker (lazydocker) |
-| `SUPER + Shift + G` | Open Signal |
-| `SUPER + X` | Open VS Code |
-| `SUPER + A` | Open Antigravity |
-| `SUPER + B` | Open Firefox |
-| `SUPER + Alt + B` | Open Firefox Private |
-| `SUPER + Shift + B` | Open Brave |
-| `SUPER + M` | Open Spotify (adblock) |
+| `SUPER + Return` | Ghostty Terminal |
+| `SUPER + Alt + Return` | Ghostty + Tmux |
+| `SUPER + X` | VS Code |
+| `SUPER + B` | Firefox |
+| `SUPER + Alt + B` | Firefox (Private) |
+| `SUPER + Shift + B` | Brave Browser |
+| `SUPER + M` | Spotify (ad-blocked) |
+| `SUPER + Shift + F` | Nautilus (File Manager) |
+| `SUPER + Alt + Shift + F` | Nautilus at current working directory |
+| `SUPER + Shift + D` | Lazydocker |
 
-### Web Apps
-
+### Web Apps & AI
 | Keybind | Action |
 | :--- | :--- |
-| `SUPER + Shift + A` | Open ChatGPT |
-| `SUPER + Shift + Alt + A` | Open Grok |
-| `SUPER + Shift + C` | Open Calendar (HEY) |
-| `SUPER + Shift + E` | Open Email (HEY) |
-| `SUPER + Shift + Y` | Open YouTube |
-| `SUPER + Shift + Alt + G` | Open WhatsApp |
-| `SUPER + Shift + P` | Open Google Photos |
-| `SUPER + Shift + X` | Open X (Twitter) |
+| `SUPER + Shift + A` | ChatGPT |
+| `SUPER + Shift + Alt + A` | Grok |
+| `SUPER + Shift + Y` | YouTube |
+| `SUPER + Shift + X` | X (Twitter) |
 | `SUPER + Shift + Alt + X` | Compose X Post |
+| `SUPER + Shift + C` | Calendar (HEY) |
+| `SUPER + Shift + E` | Email (HEY) |
 
-### Desktop & Widget Controls
-
+### System & Island Controls
 | Keybind | Action |
 | :--- | :--- |
+| `SUPER + R` | Start / Restart Dynamic Island |
+| `SUPER + Shift + R` | Kill Dynamic Island |
+| `SUPER + Alt + Q` | Launch QuickShell |
+| `SUPER + Tab` | Workspace Overview |
+| `SUPER + T` | Toggle Focus/Pomodoro Time |
 | `SUPER + Q` | Toggle Wallpaper |
 | `SUPER + E` | Next Wallpaper |
-| `SUPER + T` | Toggle Focus Time |
-| `SUPER + R` | Start Dynamic Island |
-| `SUPER + Shift + R` | Kill Dynamic Island |
-| `SUPER + Tab` | Workspace Overview |
 | `SUPER + Shift + L` | Turn Off Display (DPMS) |
-| `SUPER + Alt + Q` | Launch QuickShell |
 
-### Media Controls
-
+### Media & Screenshots
 | Keybind | Action |
 | :--- | :--- |
 | `Ctrl + Space` / `SUPER + Z` | Play / Pause |
-| `Ctrl + Alt + Right` | Next Track |
-| `Ctrl + Alt + Left` | Previous Track |
-| `Ctrl + Alt + Up` | Volume Up |
-| `Ctrl + Alt + Down` | Volume Down |
-| `Ctrl + Alt + M` | Toggle Mute |
-
-### Screenshots
-
-| Keybind | Action |
-| :--- | :--- |
+| `Ctrl + Alt + Right/Left` | Next / Previous Track |
+| `Ctrl + Alt + Up/Down` | Volume Up / Down |
+| `Ctrl + Alt + M` | Mute |
 | `Print` | Screenshot area to clipboard |
 | `SUPER + Print` | Screenshot area to file |
 | `Shift + Print` | Screenshot full screen to clipboard |
 
 ---
 
-## Installation
+## 🛠️ File Structure
 
-> **Prerequisites**: Arch Linux with Omarchy framework installed at `~/.local/share/omarchy/`
-
-<details>
-<summary><strong>Step 1: Core Dependencies</strong></summary>
-
-```bash
-# Window Manager & Desktop
-sudo pacman -S hyprland waybar ghostty quickshell
-
-# Shell & Prompt
-sudo pacman -S zsh starship
-# Oh My Zsh (manual install)
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
-
-# Theme
-yay -S catppuccin-mocha-mauve-cursors
-
-# Terminal Tools
-sudo pacman -S eza bat fzf ueberzugpp vnstat jq
-yay -S grimblast-git
-
-# Audio
-sudo pacman -S pipewire cava
-
-# Framework
-# Omarchy must be installed separately from ~/.local/share/omarchy/
-```
-</details>
-
-<details>
-<summary><strong>Step 2: Dynamic Island Dependencies</strong></summary>
-
-```bash
-# Qt6 for QML runtime
-sudo pacman -S qt6-base qt6-declarative qt6-wayland
-
-# Python backends
-sudo pacman -S python python-cryptography imagemagick
-
-# Compile C++ plugins (optional, pre-built .so files included)
-cd dynamic_island/build_backend
-mkdir build && cd build
-cmake .. && make
-```
-</details>
-
-<details>
-<summary><strong>Step 3: Encryption Vault Dependencies</strong></summary>
-
-```bash
-# Core tools
-sudo pacman -S openssl argon2 tar coreutils
-
-# Optional: AES-256-GCM support
-sudo pacman -S python-cryptography
-
-# Optional: age format support
-sudo pacman -S age
-
-# Optional: compression algorithms
-sudo pacman -S zstd lz4 brotli lzop p7zip gzip bzip2 xz
-```
-</details>
-
-<details>
-<summary><strong>Step 4: Waybar Widget Dependencies</strong></summary>
-
-```bash
-# Audio visualizer
-sudo pacman -S cava
-
-# Network traffic monitor
-sudo pacman -S vnstat
-
-# Weather (uses curl internally)
-sudo pacman -S curl
-
-# VPN detection (reads ProtonVPN config)
-# No extra packages needed
-```
-</details>
-
-<details>
-<summary><strong>Step 5: Symlink Configuration</strong></summary>
-
-```bash
-# Clone the repository
-git clone https://github.com/cipheroot/dotfiles.git ~/dotfiles
-cd ~/dotfiles
-
-# Core configurations
-ln -sf ~/dotfiles/hypr ~/.config/hypr
-ln -sf ~/dotfiles/waybar ~/.config/waybar
-ln -sf ~/dotfiles/ghostty ~/.config/ghostty
-ln -sf ~/dotfiles/cava ~/.config/cava
-ln -sf ~/dotfiles/fastfetch ~/.config/fastfetch
-ln -sf ~/dotfiles/starship/starship.toml ~/.config/starship.toml
-
-# Zsh environment
-ln -sf ~/dotfiles/zsh/zsh ~/.config/zsh
-ln -sf ~/dotfiles/zsh/.zsh ~/.zsh
-
-# Dynamic Island (QuickShell)
-ln -sf ~/dotfiles/dynamic_island ~/.config/quickshell/dynamic_island
-```
-</details>
-
-<details>
-<summary><strong>Step 6: Autostart Services</strong></summary>
-
-The following services launch automatically via `hypr/autostart.conf`:
-- Catppuccin Mocha Mauve cursor
-- KDE Connect daemon + indicator
-- ydotoold (input automation)
-- Hyprland plugins (`hyprpm load-all`)
-- Hot corners script
-- Dynamic Island (QuickShell)
-</details>
-
----
-
-## File Structure
+The repo is mostly organized by app. 
 
 ```text
 ./
-├── hypr/               # Hyprland WM config (modular .conf files)
-│   ├── scripts/        # Shell helpers (wallpaper toggle, qs_manager)
-│   └── shaders/        # 138 GLSL screen shaders (BROKEN symlinks)
-├── dynamic_island/     # QML/QuickShell Dynamic Island overlay app
-│   ├── bin/            # Python lyrics proxy + MPRIS tools
-│   ├── IslandBackend/  # Compiled C++ QML plugin
-│   └── ConnectivityBackend/ # Compiled C++ QML plugin
-├── waybar/             # Status bar config + widget scripts
-├── zsh/                # ZSH config (modular .zsh files)
-├── scripts/            # Utility scripts (enc/dec vault, fuzzy finder)
-├── fastfetch/          # System info display config
+├── hypr/               # Core WM config (bindings, monitors, autostart)
+├── dynamic_island/     # All the QML magic, C++ plugins, and Python proxies
+├── waybar/             # Bar config and widget scripts
+├── zsh/                # Shell config (split into modular .zsh files)
+├── scripts/            # Utils (this is where the enc/dec vault lives)
 ├── ghostty/            # Terminal emulator config
 ├── starship/           # Prompt config
 ├── cava/               # Audio visualizer config
-└── bg/                 # Wallpaper collection (31 images)
+├── fastfetch/          # Neofetch replacement config
+└── bg/                 # 31 hand-picked wallpapers
 ```
 
+**A few caveats if you're digging through the code:**
+1. You'll see a `hyprland/` directory at the root. Ignore it—it's a stale backup. The active config is in `hypr/`.
+2. The `hypr/shaders/` folder contains 138 GLSL screen shaders, but the symlinks are currently broken because they rely on an uninstalled package.
+3. My Zsh aliases (`zsh/zsh/aliases.zsh`) contain some hardcoded absolute paths and private IP addresses. Don't blindly copy-paste that file!
+
+## 📥 Installation
+
+Because this setup relies on the [Omarchy](https://github.com/omarchy) framework for its 3-tier config layering (Omarchy defaults → Theme → User overrides), this is **not** a plug-and-play installation. 
+
+If you want to replicate this, you'll need Arch Linux and Omarchy installed at `~/.local/share/omarchy/`.
+
+1. **Install the ecosystem:**
+   ```bash
+   sudo pacman -S hyprland waybar ghostty quickshell zsh starship eza bat fzf vnstat pipewire cava qt6-base qt6-declarative qt6-wayland python
+   ```
+2. **Clone and link:**
+   Bring down the repo and symlink the folders (e.g., `ln -sf ~/dotfiles/hypr ~/.config/hypr`) into your `~/.config` directory. 
+3. **Compile the Island Backends:**
+   If the Dynamic Island complains about missing C++ plugins, cd into `dynamic_island/build_backend`, run `cmake .. && make`, and ensure the `.so` files are correctly placed.
+
 ---
 
-## Notes & Caveats
-
-*   **Broken Shaders**: The 138 GLSL shaders in `hypr/shaders/` are currently broken symlinks. They point to `/usr/share/aether/shaders/`, which requires the `aether` package to be installed.
-*   **Stale Directory**: The `hyprland/` directory is a duplicate of `hypr/` and is likely stale. Use the `hypr/` directory for all active configurations.
-*   **Hardcoded Paths**: Some aliases in `zsh/zsh/aliases.zsh` contain absolute home paths and private IP addresses. Please review these before use.
-*   **Large Files**: This repository tracks some large files like `proxy.log` (1.5MB) and `lyricsmpris.orig` (9.9MB). These are committed artifacts that may be cleaned up in the future.
-*   **Omarchy Dependency**: This setup requires the Omarchy framework to be installed in `~/.local/share/omarchy/` for keybindings and autostart to work correctly.
-
----
-
-## Credits
-
-*   **Omarchy**: For the desktop framework and core logic.
-*   **Catppuccin**: For the Mocha color palette used throughout the system.
-*   **Hyprland**: For the smooth and powerful Wayland compositor.
-*   **QuickShell**: For the foundation of the Dynamic Island overlay.
-*   **JetBrains & VictorMono**: For the excellent Nerd Fonts.
-
----
+*Shoutout to the creators of Hyprland, QuickShell, and Catppuccin for making Linux ricing so damn fun.*

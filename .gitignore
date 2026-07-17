@@ -31,3 +31,6 @@
 # OS/System files
 .DS_Store
 Thumbs.db
+
+# Test files
+dynamic_island/test_subs/

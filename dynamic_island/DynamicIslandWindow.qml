@@ -793,6 +793,65 @@ PanelWindow {
         property string timePlayed: "0:00"
         property string timeTotal: "0:00"
 
+        // YouTube captions fallback
+        property string ytCaption: ""          // current caption line from YT, empty when none
+        property bool ytFetchingCaptions: false // true while yt-dlp is still searching
+        property string _ytLastLookupKey: ""   // track+artist we last searched for
+
+        function _ytPositionMs() {
+            if (!activePlayer) return 0;
+            let pos = Number(activePlayer.position) || 0;
+            // MPRIS position is in microseconds
+            if (pos > 1e6) return Math.floor(pos / 1000);
+            // Some players report in seconds
+            if (pos < 10000) return Math.floor(pos * 1000);
+            return Math.floor(pos);
+        }
+
+        function pollYtCaptions() {
+            const trackUrl = activePlayer && activePlayer.metadata && activePlayer.metadata["xesam:url"] ? activePlayer.metadata["xesam:url"] : "";
+            const isYtUrl = trackUrl.indexOf("youtube.com") > -1 || trackUrl.indexOf("youtu.be") > -1;
+
+            if (!isYtUrl && lyricsBridge.backendStatus !== "missing" && lyricsBridge.backendStatus !== "error") return;
+
+            const track = lyricsLookupTitle;
+            const artist = lyricsLookupArtist;
+            if (!isYtUrl && (!track || track === "Unknown")) {
+                ytCaption = "";
+                ytFetchingCaptions = false;
+                return;
+            }
+            const posMs = _ytPositionMs();
+            const url = "http://127.0.0.1:8765/ytcaptions"
+                + "?track_name=" + encodeURIComponent(track)
+                + "&artist_name=" + encodeURIComponent(artist)
+                + "&position_ms=" + posMs
+                + (trackUrl !== "" ? "&url=" + encodeURIComponent(trackUrl) : "");
+            const xhr = new XMLHttpRequest();
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState !== 4) return;
+                if (xhr.status === 202) {
+                    // Still fetching — keep spinner state, timer will retry
+                    ytFetchingCaptions = true;
+                    return;
+                }
+                ytFetchingCaptions = false;
+                if (xhr.status === 200) {
+                    try {
+                        const data = JSON.parse(xhr.responseText);
+                        ytCaption = data.text || "";
+                    } catch(e) {
+                        ytCaption = "";
+                    }
+                } else {
+                    ytCaption = "";
+                }
+                updateRestingStateForLyrics();
+            };
+            xhr.open("GET", url, true);
+            xhr.send();
+        }
+
         function handleConfiguredClickAction(actionName) {
             switch (actionName) {
             case "":
@@ -1771,6 +1830,9 @@ PanelWindow {
         onPlayersListChanged: _refreshActivePlayer()
         onCurrentTrackChanged: {
             userSwipedAwayFromLyrics = false;
+            ytCaption = "";
+            ytFetchingCaptions = false;
+            _ytLastLookupKey = "";
             if (currentTrack !== "" && islandState !== "control_center" && islandState !== "notification") {
                 if (islandState === "expanded" && !expandedByPlayerAutoOpen) {
                     updateRestingStateForLyrics();
@@ -1843,14 +1905,22 @@ PanelWindow {
             }
 
             let hasLyrics = false;
-            if (lyricsBridge.backendStatus === "missing" || lyricsBridge.backendStatus === "error") {
-                hasLyrics = false;
-            } else if (lyricsBridge.isSynced || lyricsBridge.plainLyric !== "" || lyricsBridge.currentLyric !== "" || inlineLyricsRaw !== "") {
+            let primaryHasLyrics = lyricsBridge.isSynced || lyricsBridge.plainLyric !== "" || lyricsBridge.currentLyric !== "" || inlineLyricsRaw !== "";
+
+            if (primaryHasLyrics) {
                 hasLyrics = true;
-            } else {
-                if (lyricsBridge.backendStatus === "starting" || lyricsBridge.backendStatus === "idle") {
-                    return;
+            } else if (lyricsBridge.backendStatus !== "starting" && lyricsBridge.backendStatus !== "idle") {
+                // If backend is running, missing, or error but has no lyrics, activate YT fallback
+                const lookupKey = lyricsLookupTitle + "|" + lyricsLookupArtist;
+                if (_ytLastLookupKey !== lookupKey) {
+                    _ytLastLookupKey = lookupKey;
+                    ytCaption = "";
+                    ytFetchingCaptions = true;
+                    pollYtCaptions();
                 }
+                hasLyrics = ytCaption !== "" || ytFetchingCaptions;
+            } else {
+                return;
             }
 
             lastCheckedTrack = currentTrack;
@@ -2276,18 +2346,27 @@ PanelWindow {
             readonly property string backendStatus: SysBackend && SysBackend.lyricsBackendStatus !== undefined ? SysBackend.lyricsBackendStatus : "idle"
             readonly property var plainLines: islandContainer.parsePlainLyrics(islandContainer.inlineLyricsRaw)
             readonly property string plainLyric: plainLines.length > 0 ? plainLines[0] : ""
+            readonly property string trackUrl: islandContainer.activePlayer && islandContainer.activePlayer.metadata && islandContainer.activePlayer.metadata["xesam:url"] ? islandContainer.activePlayer.metadata["xesam:url"] : ""
+            readonly property bool isYtUrl: trackUrl.indexOf("youtube.com") > -1 || trackUrl.indexOf("youtu.be") > -1
+            readonly property bool ytActive: (isYtUrl || backendStatus === "missing" || backendStatus === "error") && islandContainer.ytCaption !== ""
             readonly property string displayText: {
                 if (title === "")
                     return "No music playing";
-
-                if (backendStatus === "missing" || backendStatus === "error")
-                    return "no lyrics";
 
                 if (isSynced && currentLyric !== "")
                     return currentLyric;
 
                 if (plainLyric !== "")
                     return plainLyric;
+
+                // YT captions fallback
+                if (isYtUrl || backendStatus === "missing" || backendStatus === "error") {
+                    if (islandContainer.ytFetchingCaptions && islandContainer.ytCaption === "")
+                        return "♪ " + (artist !== "" && artist !== "Unknown" ? title + " - " + artist : title);
+                    if (islandContainer.ytCaption !== "")
+                        return islandContainer.ytCaption;
+                    return "no lyrics";
+                }
 
                 return artist !== "" && artist !== "Unknown" ? title + " - " + artist : title;
             }
@@ -2318,6 +2397,31 @@ PanelWindow {
                     islandContainer.timePlayed = islandContainer.formatTime(currentPos);
                     islandContainer.timeTotal = "0:00";
                 }
+            }
+        }
+
+        Timer {
+            id: ytCaptionPoller
+
+            // Poll every 1.5s while captions are active, 3s while still fetching
+            interval: islandContainer.ytFetchingCaptions ? 3000 : 1500
+            repeat: true
+            // Run whenever lyricsmpris found nothing and a track is playing —
+            // no restingState gate so we can poll even before capsule transitions.
+            running: {
+                if (!islandContainer.activePlayer) return false;
+                if (islandContainer.activePlayer.playbackState !== MprisPlaybackState.Playing) return false;
+                if (!islandContainer.currentTrack || islandContainer.currentTrack === "Unknown") return false;
+                if (lyricsBridge.isSynced || lyricsBridge.plainLyric !== "" || lyricsBridge.currentLyric !== "") return false;
+
+                const trackUrl = islandContainer.activePlayer.metadata && islandContainer.activePlayer.metadata["xesam:url"] ? islandContainer.activePlayer.metadata["xesam:url"] : "";
+                const isYtUrl = trackUrl.indexOf("youtube.com") > -1 || trackUrl.indexOf("youtu.be") > -1;
+
+                if (!isYtUrl && (lyricsBridge.backendStatus === "starting" || lyricsBridge.backendStatus === "idle")) return false;
+                return true;
+            }
+            onTriggered: {
+                islandContainer.pollYtCaptions();
             }
         }
 
