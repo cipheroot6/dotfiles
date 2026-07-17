@@ -39,8 +39,10 @@ hypr/
 - **All configs sourced** from `hyprland.conf` (never `exec-once` directly)
 - **Keybinds**: `$mainMod = SUPER`, organized by category (apps, music, screenshots, QS)
 - **Windows**: `rounding = 35`, window rules for opacity by app class
+- **mocha.config**: 26 colors × 2 forms (`$name = rgb(hex)` + `$nameAlpha = hex`)
 
 ## ANTI-PATTERNS
 
 - **`shaders/` directory**: All 138 `.glsl` files are broken symlinks to `/usr/share/aether/shaders/`. Install `aether` or remove the directory.
 - **Commented-out alternatives** in `bindings.conf`, `input.conf`, `monitors.conf`, `looknfeel.conf` — noisy dead documentation.
+- **`hyprpaper.conf`**: Hardcoded wallpaper path to `~/.local/share/wallpapers/...`.
