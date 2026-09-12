@@ -1,0 +1,4 @@
+singleton UserConfig 1.0 UserConfig.qml
+DynamicIslandWindow 1.0 DynamicIslandWindow.qml
+HyprlandData 1.0 HyprlandData.qml
+WallpaperThumbnailCache 1.0 WallpaperThumbnailCache.qml

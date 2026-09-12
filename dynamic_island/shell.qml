@@ -1,14 +1,19 @@
 import QtQuick
+import IslandBackend
 import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Io
+import "qml/core"
+import "qml/island"
+import "qml/controlcenter"
+import "qml/productivity"
+import "qml/workspace"
+import "qml/extras"
+
 
 Scope {
     id: shellRoot
 
-    UserConfig {
-        id: userConfig
-    }
 
     function toggleTodo() {
         // Close control center on all windows first
@@ -83,14 +88,14 @@ Scope {
     }
 
     GlobalShortcut {
-        appid: userConfig.overviewGlobalShortcutAppid
-        name: userConfig.overviewGlobalShortcutName
+        appid: UserConfig.overviewGlobalShortcutAppid
+        name: UserConfig.overviewGlobalShortcutName
 
         onPressed: shellRoot.toggleOverviewAll()
     }
 
     GlobalShortcut {
-        appid: userConfig.overviewGlobalShortcutAppid
+        appid: UserConfig.overviewGlobalShortcutAppid
         name: "dynamic-island-time-hold"
 
         onPressed: {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # --- config ---
-LOCATION=""
+LOCATION="pune"
 CACHE_FILE="/tmp/waybar-weather-cache"
 CACHE_TTL=600
 # --- icons ---

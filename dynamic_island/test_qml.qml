@@ -1,4 +1,5 @@
 import QtQuick
+import IslandBackend
 import Quickshell
 import Quickshell.Io
 
