@@ -171,9 +171,16 @@ tooltip label {
 
 #network,
 #custom-vpn,
-#custom-traffic {
+#custom-traffic,
+#battery,
+#custom-phone-battery,
+#custom-earbuds-battery,
+#custom-phone-notifications,
+#custom-phone-storage,
+#custom-phone-mirror {
   color: #cba6f7;
   padding: 0 6px;
+  margin: 0;
 }
 
 #network.disconnected {
@@ -197,14 +204,60 @@ tooltip label {
   color: #99ff99;
 }
 
-#battery {
-  color: #cba6f7;
-  padding: 0 6px;
-}
-
 #battery.charging.warning,
 #battery.charging.critical {
     color: #99FF99;
+}
+
+#custom-phone-battery.warning,
+#custom-earbuds-battery.warning {
+  color: #f9e2af;
+}
+
+#custom-phone-battery.critical,
+#custom-earbuds-battery.critical {
+  color: #f38ba8;
+  animation: blink 0.5s linear infinite alternate;
+}
+
+#custom-phone-battery.charging {
+  color: #cba6f7;
+}
+
+#custom-phone-battery.plugged {
+  color: #99ff99;
+}
+
+#custom-phone-battery.charging.warning,
+#custom-phone-battery.charging.critical {
+  color: #99ff99;
+}
+
+#custom-phone-notifications.has-notifications {
+  color: #cba6f7;
+}
+
+#custom-phone-storage.mounted,
+#custom-phone-mirror.active {
+  color: #a6e3a1;
+}
+
+#custom-phone-mirror.inactive {
+  color: #6c7086;
+}
+
+#custom-phone-battery.disconnected,
+#custom-earbuds-battery.disconnected,
+#custom-phone-notifications.hidden,
+#custom-phone-notifications.disconnected,
+#custom-phone-storage.disconnected,
+#custom-phone-mirror.disconnected {
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: none;
+  font-size: 0;
+  background: transparent;
 }
 
 @keyframes blink {

@@ -11,8 +11,14 @@ waybar/
 ├── cava.sh             # Audio visualizer (60fps unicode bars from CAVA raw output)
 ├── vpn.sh              # VPN country detection (ProtonVPN + geolocation API fallback)
 ├── weather.sh          # Weather widget (wttr.in, Pango markup, auto-hides during media)
-├── traffic.py          # Network traffic monitor (vnstat live + daily/monthly totals)
-└── .vpn_cache/         # VPN IP/country cache files
+├── traffic.py              # Network traffic monitor (vnstat live + daily/monthly totals)
+├── phone_battery.sh        # Phone battery widget (KDE Connect DBus/CLI, auto-hides when disconnected)
+├── earbuds_battery.sh      # Bluetooth earbuds battery widget (BlueZ/UPower, auto-hides when disconnected)
+├── phone_notifications.sh  # Phone notifications badge (KDE Connect DBus, auto-hides when 0)
+├── phone_storage.sh        # Phone wireless storage mount/open (KDE Connect SFTP)
+├── phone_mirror.sh         # Phone screen mirror Waybar status monitor
+├── mirror.sh               # Phone screen mirror launcher (scrcpy + auto-detected ADB wireless port)
+└── .vpn_cache/             # VPN IP/country cache files
 ```
 
 ## WHERE TO LOOK
@@ -21,9 +27,10 @@ waybar/
 |------|------|
 | Add/remove modules | `config.jsonc` → left/center/right arrays |
 | Change colors/styling | `style.css` → Catppuccin Mocha hex values |
-| Widget behavior | `cava.sh`, `vpn.sh`, `weather.sh`, `traffic.py` |
+| Widget behavior | `cava.sh`, `vpn.sh`, `weather.sh`, `traffic.py`, `phone_*.sh`, `earbuds_battery.sh`, `mirror.sh` |
 | VPN cache logic | `vpn.sh` → reads ProtonVPN JSONs, queries ipinfo/ifconfig.co |
 | Weather hide logic | `weather.sh` → checks playerctl, sets `.hidden` class |
+| Phone & earbuds logic | `phone_battery.sh`, `earbuds_battery.sh`, `phone_notifications.sh`, `phone_storage.sh`, `phone_mirror.sh`, `mirror.sh` |
 
 ## CONVENTIONS
 
